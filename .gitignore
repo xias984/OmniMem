@@ -1,0 +1,24 @@
+# Dipendenze Node
+node_modules/
+
+# Dati locali — generati da Docker al primo avvio
+chroma_data/
+
+# Log
+*.log
+
+# Documentazione interna
+AI_e_RAG_briefing.md
+CLAUDE.md
+intend.md
+spec.md
+
+# Lock files
+package-lock.json
+
+# Variabili d'ambiente locali
+.env
+
+# OS
+.DS_Store
+Thumbs.db
