@@ -238,10 +238,30 @@ function chunkCode(relPath, content) {
   return chunks;
 }
 
+// Traduce un path host (es. "C:\daniel\memory-ext-ai") nel path container
+// (es. "/workspace/memory-ext-ai") quando il server gira in Docker con
+// CODEBASE_HOST_PATH bind-mountato su /workspace. No-op fuori da Docker.
+function translateHostPath(rootPath) {
+  const hostPrefix = process.env.CODEBASE_HOST_PATH;
+  if (!hostPrefix || hostPrefix === '.') return rootPath;
+  const normalize = (p) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const normRoot = normalize(rootPath);
+  const normPrefix = normalize(hostPrefix);
+  if (normRoot === normPrefix) return '/workspace';
+  if (normRoot.startsWith(normPrefix + '/')) {
+    return '/workspace' + rootPath.replace(/\\/g, '/').slice(hostPrefix.length);
+  }
+  return rootPath;
+}
+
 async function processIngestCodebase(body, jobId) {
   const job = jobs.get(jobId);
   try {
-    const { path: rootPath, topic, extensions } = body;
+    const { path: rawPath, topic, extensions } = body;
+    const rootPath = translateHostPath(rawPath);
+    if (rootPath !== rawPath) {
+      console.log(`[ingest-codebase] path host "${rawPath}" → container "${rootPath}"`);
+    }
     const extSet = extensions?.length
       ? new Set(extensions.map((e) => e.toLowerCase().replace(/^\./, '')))
       : DEFAULT_CODE_EXTENSIONS;

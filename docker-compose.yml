@@ -65,6 +65,12 @@ services:
     environment:
       - OLLAMA_BASE=${OLLAMA_BASE:-http://ollama:11434}
       - CHROMA_URL=http://chromadb:8000
+      - CODEBASE_HOST_PATH=${CODEBASE_HOST_PATH:-.}
+    volumes:
+      # Bind-mount della codebase host per /api/ingest-codebase.
+      # Default: la directory corrente (dove sta docker-compose.yml).
+      # Override con CODEBASE_HOST_PATH nel .env per puntare ad altre cartelle.
+      - ${CODEBASE_HOST_PATH:-.}:/workspace:ro
     depends_on:
       chromadb:
         condition: service_healthy
