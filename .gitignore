@@ -19,6 +19,9 @@ package-lock.json
 # Variabili d'ambiente locali
 .env
 
+# Cursori MCP locali
+mcp/.omnimem-cursors.json
+
 # OS
 .DS_Store
 Thumbs.db

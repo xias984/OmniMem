@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "omnimem": {
+      "command": "node",
+      "args": ["mcp/omnimem-mcp.js"],
+      "env": {
+        "CHROMA_URL": "http://localhost:8000"
+      }
+    }
+  }
+}

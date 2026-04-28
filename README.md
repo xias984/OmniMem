@@ -134,15 +134,30 @@ Se usi una AI non nella lista supportata:
 2. Il cursore diventa una croce — clicca sul campo testo della chat
 3. OmniMem memorizzerà quel campo come target per l'iniezione
 
-### Generare un briefing con Claude Code
+### Generare/aggiornare una LLM Wiki con Claude Code
 
 Con il MCP server configurato, chiedi direttamente a Claude Code:
 
 ```
-Usa il tool omnimem per il topic "Coding Python" e crea un briefing
+Usa il tool omnimem per il topic "Coding Python"
 ```
 
-Claude Code recupera i chunk dalla memoria e genera un documento `.md` strutturato nella cartella corrente, senza chiamate a API esterne — usa il tuo abbonamento Claude Team.
+Il MCP non genera un singolo briefing: istruisce Claude Code a costruire e mantenere una **LLM Wiki** (pattern [Karpathy](https://karpathy.bearblog.dev/llm-wiki/)) nella directory di lavoro corrente — una collezione interlinkata di pagine markdown che si arricchisce nel tempo invece di essere ri-derivata a ogni query.
+
+**Prima chiamata su un topic** (cursore vuoto):
+- Claude Code crea `<topic>_Wiki/` nella CWD
+- Inizializza `CLAUDE.md` (schema), `Index.md` (catalogo), `log.md` (cronologico), una pagina di overview, e una pagina markdown per ogni entità/concetto estratto dai chunk, con interlink `[[Nome_Pagina]]`
+- Restituisce **tutti** i chunk del topic
+
+**Chiamate successive** (modalità incrementale automatica):
+- Il MCP mantiene un **cursore per topic** in `mcp/.omnimem-cursors.json` (timestamp dell'ultimo chunk consegnato)
+- Ogni nuova chiamata restituisce **solo i chunk arrivati dopo l'ultima sincronizzazione**
+- Claude Code legge la wiki esistente e integra i nuovi chunk in modo additivo: aggiorna le pagine impattate, ne crea di nuove se emergono entità inedite, appende una voce a `log.md`
+- Zero token sprecati a rileggere ciò che è già stato sintetizzato
+
+Per forzare il re-import completo (ignorando il cursore), chiama il tool con `full=true`.
+
+Tutta l'elaborazione usa il tuo abbonamento Claude Team — nessuna chiamata a API esterne, nessun OpenAI key.
 
 ### Esportare la memoria (raw)
 
