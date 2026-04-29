@@ -13,22 +13,12 @@
     "service_worker": "background.js"
   },
   "host_permissions": [
-    "https://chat.openai.com/*",
-    "https://chatgpt.com/*",
-    "https://gemini.google.com/*",
-    "https://claude.ai/*",
-    "https://chat.deepseek.com/*",
+    "<all_urls>",
     "http://localhost:3000/*"
   ],
   "content_scripts": [
     {
-      "matches": [
-        "https://chat.openai.com/*",
-        "https://chatgpt.com/*",
-        "https://gemini.google.com/*",
-        "https://claude.ai/*",
-        "https://chat.deepseek.com/*"
-      ],
+      "matches": ["<all_urls>"],
       "js": ["content_script.js"],
       "run_at": "document_idle"
     }

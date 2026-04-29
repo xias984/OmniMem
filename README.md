@@ -128,19 +128,32 @@ Il sistema cerca i chunk più simili alla tua domanda nel database e li prepende
 
 ### Piattaforma non riconosciuta
 
-Se usi una AI non nella lista supportata:
+Da quando l'estensione gira su `<all_urls>`, il pannello OmniMem appare su qualsiasi sito (devi ricaricare i tab già aperti dopo aver installato/aggiornato l'estensione). Sono disponibili due modalità di "target manuale":
 
-1. Clicca **✎ Target manuale**
-2. Il cursore diventa una croce — clicca sul campo testo della chat
-3. OmniMem memorizzerà quel campo come target per l'iniezione
+- **✎ Target inject** — clicca sul campo testo della chat dove vuoi iniettare il contesto RAG. Il cursore diventa una croce: clicca su un `<textarea>` o su un elemento `contenteditable`.
+- **🎯 Target estrazione** — clicca sul contenitore dei messaggi che vuoi registrare (es. il pannello messaggi di Google Chat, Slack, una thread di forum, ecc.). L'algoritmo sale nel DOM finché trova un contenitore con almeno 2 figli "ragionevoli" e ne usa i figli diretti come messaggi (`role: 'unknown'`, `platform: Manual:<hostname>`).
+
+> **Limite della modalità manuale**: vengono estratti solo i messaggi presenti nel DOM al momento del Rec. Su siti con virtualizzazione aggressiva (es. Google Chat) significa solo i ~30-100 messaggi visibili. Per chat lunghe scrolla in cima prima di registrare, oppure premi Rec a porzioni mentre scrolli.
 
 ### Generare/aggiornare una LLM Wiki con Claude Code
 
-Con il MCP server configurato, chiedi direttamente a Claude Code:
+Con il MCP server configurato, apri Claude Code in una directory dove vuoi che viva la wiki e chiedigli esplicitamente di usare il tool `omnimem`. Esempi di prompt che funzionano:
 
 ```
-Usa il tool omnimem per il topic "Coding Python"
+Genera la LLM Wiki per il topic "Coding Python" usando il tool omnimem
 ```
+
+```
+Aggiorna la wiki del topic "EVO" con i nuovi chunk arrivati dall'ultima sincronizzazione (usa omnimem)
+```
+
+```
+Forza il re-import completo del topic "ST-923": chiama omnimem con full=true e ricostruisci la wiki da zero
+```
+
+Il tool si chiama letteralmente `omnimem` ed è l'unico esposto dal MCP. Accetta due parametri:
+- `topic` (obbligatorio) — il nome del topic così come l'hai scritto in fase di Rec
+- `full` (opzionale, default `false`) — se `true` ignora il cursore incrementale e restituisce tutti i chunk del topic
 
 Il MCP non genera un singolo briefing: istruisce Claude Code a costruire e mantenere una **LLM Wiki** (pattern [Karpathy](https://karpathy.bearblog.dev/llm-wiki/)) nella directory di lavoro corrente — una collezione interlinkata di pagine markdown che si arricchisce nel tempo invece di essere ri-derivata a ogni query.
 
@@ -167,17 +180,25 @@ curl http://localhost:3000/api/export/Coding%20Python -o coding_python.md
 
 Genera un file Markdown grezzo con tutti i chunk del topic, ordinati per timestamp.
 
+### Dashboard web
+
+Apri **http://localhost:3000** nel browser per un riepilogo visuale della memoria registrata:
+
+- **Card riassuntive**: totale chunk e numero di argomenti
+- **Tabella per topic** ordinata per ultimo aggiornamento, con: numero di chunk, badge piattaforme (con conteggio per ognuna), numero di fonti uniche, data dell'ultimo update e link diretto all'export Markdown
+- **Browse per topic**: click su una riga per espandere e mostrare gli ultimi 20 chunk con timestamp, fonte e testo
+
 ---
 
 ## Piattaforme supportate
 
 | Piattaforma | Estrazione messaggi | Iniezione prompt |
 |---|---|---|
-| ChatGPT (`chat.openai.com`) | ✓ | ✓ |
-| Gemini (`gemini.google.com`) | ✓ | ✓ |
-| Claude (`claude.ai`) | ✓ | ✓ |
-| DeepSeek (`chat.deepseek.com`) | ✓ | ✓ |
-| Qualsiasi altra | — | ✓ (target manuale) |
+| ChatGPT (`chat.openai.com`) | ✓ auto | ✓ auto |
+| Gemini (`gemini.google.com`) | ✓ auto | ✓ auto |
+| Claude (`claude.ai`) | ✓ auto | ✓ auto |
+| DeepSeek (`chat.deepseek.com`) | ✓ auto | ✓ auto |
+| Qualsiasi altro sito | ✓ (🎯 Target estrazione) | ✓ (✎ Target inject) |
 
 ---
 
@@ -185,7 +206,10 @@ Genera un file Markdown grezzo con tutti i chunk del topic, ordinati per timesta
 
 | Endpoint | Metodo | Descrizione |
 |---|---|---|
+| `/` | GET | Dashboard HTML con riepilogo dei dati registrati |
 | `/health` | GET | Stato del server |
+| `/api/stats` | GET | Aggregato per topic: chunk, piattaforme, fonti, ultimo timestamp |
+| `/api/browse?topic=&limit=&offset=` | GET | Sfoglia i chunk di un topic con metadati |
 | `/api/record` | POST | Salva messaggi in ChromaDB (asincrono) |
 | `/api/progress/:jobId` | GET | Stato di avanzamento di un job |
 | `/api/query` | POST | Cerca chunk per similarità |
@@ -262,8 +286,9 @@ memory-ext-ai/
 - Il sistema filtra automaticamente i chunk con similarità troppo bassa
 
 **Limiti attuali:**
-- L'estrazione funziona solo sui messaggi visibili nella pagina: fai scroll verso l'alto prima di cliccare Rec su conversazioni lunghe
-- Su Gemini il selettore potrebbe variare dopo aggiornamenti dell'interfaccia — in quel caso usa la modalità Target manuale
+- L'estrazione automatica (ChatGPT/Gemini/Claude/DeepSeek) prova a scrollare in cima per caricare la cronologia, ma su chat molto lunghe il loader può saltare alcuni messaggi: verifica nella dashboard
+- Sui siti generici (modalità 🎯 Target estrazione) viene letto solo il DOM corrente — niente auto-scroll, niente role detection: piattaforme con virtualizzazione (Google Chat, Slack) vanno scrollate manualmente prima di Rec
+- I selettori delle piattaforme native si rompono se la UI cambia: in quel caso il fallback è la modalità Target estrazione
 
 ---
 

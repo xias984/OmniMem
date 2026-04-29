@@ -99,6 +99,7 @@ function extractMessages(platform) {
 // ─── Manual target mode (unknown platforms) ──────────────────────────────────
 
 let manualTargetBox = null;
+let manualExtractContainer = null;
 
 function enterManualTargetMode() {
   showStatus('Clicca sul campo testo della chat per selezionarlo…', 'info');
@@ -117,6 +118,114 @@ function enterManualTargetMode() {
   }
 
   document.addEventListener('click', onClick, { capture: true, once: false });
+}
+
+function findExtractCandidate(el) {
+  let candidate = el;
+  while (candidate && candidate !== document.body) {
+    const children = Array.from(candidate.children);
+    const meaningful = children.filter((c) => (c.innerText ?? '').trim().length > 20);
+    if (meaningful.length >= 2) break;
+    candidate = candidate.parentElement;
+  }
+  return candidate ?? el;
+}
+
+function buildHighlightOverlay() {
+  const overlay = document.createElement('div');
+  overlay.id = 'omnimem-highlight';
+  overlay.style.cssText = `
+    position: fixed; pointer-events: none; z-index: 2147483646;
+    background: rgba(93, 186, 93, 0.18);
+    border: 2px solid #5dba5d; box-sizing: border-box;
+    transition: all 0.05s linear; display: none;
+  `;
+  const label = document.createElement('div');
+  label.id = 'omnimem-highlight-label';
+  label.style.cssText = `
+    position: absolute; top: -22px; left: 0;
+    background: #5dba5d; color: #0d2a0d;
+    font: 11px/1.4 system-ui, sans-serif;
+    padding: 2px 6px; border-radius: 3px 3px 0 0;
+    white-space: nowrap;
+  `;
+  overlay.appendChild(label);
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+function updateHighlight(overlay, el) {
+  if (!el) { overlay.style.display = 'none'; return; }
+  const r = el.getBoundingClientRect();
+  if (r.width === 0 && r.height === 0) { overlay.style.display = 'none'; return; }
+  overlay.style.display = 'block';
+  overlay.style.top = `${r.top}px`;
+  overlay.style.left = `${r.left}px`;
+  overlay.style.width = `${r.width}px`;
+  overlay.style.height = `${r.height}px`;
+  const label = overlay.querySelector('#omnimem-highlight-label');
+  const cls = el.className && typeof el.className === 'string' ? `.${el.className.trim().split(/\s+/)[0]}` : '';
+  const id = el.id ? `#${el.id}` : '';
+  label.textContent = `<${el.tagName.toLowerCase()}${id}${cls}> · ${el.children.length} figli`;
+}
+
+function enterManualExtractMode() {
+  showStatus('Muovi il mouse, click per selezionare. Esc per annullare.', 'info');
+  document.body.style.cursor = 'crosshair';
+  const overlay = document.getElementById('omnimem-highlight') ?? buildHighlightOverlay();
+  let currentCandidate = null;
+
+  const onMove = (e) => {
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    if (!target || target.closest('#omnimem-panel') || target.closest('#omnimem-highlight')) {
+      updateHighlight(overlay, null);
+      currentCandidate = null;
+      return;
+    }
+    currentCandidate = findExtractCandidate(target);
+    updateHighlight(overlay, currentCandidate);
+  };
+
+  const cleanup = () => {
+    document.body.style.cursor = '';
+    overlay.remove();
+    document.removeEventListener('mousemove', onMove, true);
+    document.removeEventListener('click', onClick, true);
+    document.removeEventListener('keydown', onKey, true);
+  };
+
+  const onClick = (e) => {
+    if (e.target.closest('#omnimem-panel')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const candidate = currentCandidate ?? findExtractCandidate(e.target);
+    manualExtractContainer = candidate;
+    const count = candidate.children.length;
+    showStatus(`Contenitore acquisito: <${candidate.tagName.toLowerCase()}> (${count} figli)`, 'ok');
+    cleanup();
+  };
+
+  const onKey = (e) => {
+    if (e.key === 'Escape') {
+      showStatus('Selezione annullata.', 'warn');
+      cleanup();
+    }
+  };
+
+  document.addEventListener('mousemove', onMove, true);
+  document.addEventListener('click', onClick, { capture: true, once: true });
+  document.addEventListener('keydown', onKey, true);
+}
+
+function extractMessagesManual(container) {
+  const messages = [];
+  for (const child of container.children) {
+    const text = (child.innerText ?? child.textContent ?? '').trim();
+    if (text.length > 2) {
+      messages.push({ role: 'unknown', text });
+    }
+  }
+  return messages;
 }
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
@@ -191,15 +300,23 @@ async function scrollToLoadAll() {
 
 async function recordChat(topic) {
   const platform = detectPlatform();
-  if (!platform) {
-    showStatus('Piattaforma non riconosciuta.', 'warn');
+  let messages;
+  let platformName;
+
+  if (platform) {
+    showStatus('Scorrimento pagina per caricare tutta la chat…', 'info');
+    await scrollToLoadAll();
+    messages = extractMessages(platform);
+    platformName = platform.name;
+  } else if (manualExtractContainer && document.body.contains(manualExtractContainer)) {
+    showStatus('Estrazione dal contenitore manuale…', 'info');
+    messages = extractMessagesManual(manualExtractContainer);
+    platformName = `Manual:${window.location.hostname}`;
+  } else {
+    showStatus('Piattaforma non riconosciuta. Usa "Target estrazione".', 'warn');
     return;
   }
 
-  showStatus('Scorrimento pagina per caricare tutta la chat…', 'info');
-  await scrollToLoadAll();
-
-  const messages = extractMessages(platform);
   if (messages.length === 0) {
     showStatus('Nessun messaggio trovato.', 'warn');
     return;
@@ -214,7 +331,7 @@ async function recordChat(topic) {
       topic,
       metadata: {
         source_url: window.location.href,
-        platform: platform.name,
+        platform: platformName,
         timestamp: Date.now(),
       },
     });
@@ -424,7 +541,10 @@ function buildUI() {
 
     <div style="display:flex;gap:6px;margin-bottom:6px">
       <button id="omnimem-manual" style="flex:1;background:#6d4c1f;color:#f0c060;border:none;border-radius:5px;padding:5px;cursor:pointer;font-size:11px">
-        ✎ Target manuale
+        ✎ Target inject
+      </button>
+      <button id="omnimem-manual-extract" style="flex:1;background:#1f4d6d;color:#60b8f0;border:none;border-radius:5px;padding:5px;cursor:pointer;font-size:11px">
+        🎯 Target estrazione
       </button>
     </div>
 
@@ -485,6 +605,7 @@ function buildUI() {
   });
 
   document.getElementById('omnimem-manual').addEventListener('click', enterManualTargetMode);
+  document.getElementById('omnimem-manual-extract').addEventListener('click', enterManualExtractMode);
 
   document.getElementById('omnimem-delete-topic').addEventListener('click', async () => {
     const topic = getSelectedTopic();
@@ -553,12 +674,18 @@ function buildUI() {
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
-// Listen for toggle message from popup / background
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.action === 'togglePanel') buildUI();
-});
+function removeUI() {
+  document.getElementById('omnimem-panel')?.remove();
+}
 
-// Auto-build if already enabled (persisted via storage)
+// Auto-build se attiva all'avvio della pagina
 chrome.storage.local.get('omnimemPanelOpen', ({ omnimemPanelOpen }) => {
   if (omnimemPanelOpen) buildUI();
+});
+
+// Reagisce in tempo reale al toggle del popup su tutti i tab aperti
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes.omnimemPanelOpen) return;
+  if (changes.omnimemPanelOpen.newValue) buildUI();
+  else removeUI();
 });

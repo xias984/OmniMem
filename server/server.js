@@ -513,9 +513,238 @@ app.get('/api/export/:topic', async (req, res) => {
   }
 });
 
+// ─── GET /api/stats ──────────────────────────────────────────────────────────
+
+app.get('/api/stats', async (_req, res) => {
+  try {
+    const collection = await getCollection();
+    const results = await collection.get({ include: ['metadatas'], limit: 100000 });
+    const metas = results.metadatas ?? [];
+
+    const byTopic = new Map();
+    for (const m of metas) {
+      const topic = m?.topic ?? 'Generale';
+      const platform = m?.platform ?? 'unknown';
+      const source = m?.source_url ?? '';
+      const ts = m?.timestamp ?? 0;
+
+      if (!byTopic.has(topic)) {
+        byTopic.set(topic, {
+          topic,
+          chunks: 0,
+          platforms: new Map(),
+          sources: new Set(),
+          last_timestamp: 0,
+        });
+      }
+      const t = byTopic.get(topic);
+      t.chunks += 1;
+      t.platforms.set(platform, (t.platforms.get(platform) ?? 0) + 1);
+      if (source) t.sources.add(source);
+      if (ts > t.last_timestamp) t.last_timestamp = ts;
+    }
+
+    const topics = [...byTopic.values()]
+      .map((t) => ({
+        topic: t.topic,
+        chunks: t.chunks,
+        platforms: Object.fromEntries(t.platforms),
+        sources_count: t.sources.size,
+        last_timestamp: t.last_timestamp,
+      }))
+      .sort((a, b) => b.last_timestamp - a.last_timestamp);
+
+    res.json({
+      ok: true,
+      total_chunks: metas.length,
+      total_topics: topics.length,
+      topics,
+    });
+  } catch (err) {
+    console.error('[stats]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/browse ─────────────────────────────────────────────────────────
+
+app.get('/api/browse', async (req, res) => {
+  try {
+    const topic = req.query.topic;
+    const limit = Math.min(parseInt(req.query.limit) || 50, 500);
+    const offset = parseInt(req.query.offset) || 0;
+
+    const collection = await getCollection();
+    const results = await collection.get({
+      where: topic ? { topic: { $eq: topic } } : undefined,
+      include: ['documents', 'metadatas'],
+      limit: limit + offset,
+    });
+
+    const docs = results.documents ?? [];
+    const metas = results.metadatas ?? [];
+    const ids = results.ids ?? [];
+
+    const items = docs
+      .map((doc, i) => ({ id: ids[i], doc, meta: metas[i] }))
+      .sort((a, b) => (b.meta?.timestamp ?? 0) - (a.meta?.timestamp ?? 0))
+      .slice(offset, offset + limit);
+
+    res.json({ ok: true, total: docs.length, items });
+  } catch (err) {
+    console.error('[browse]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET / — Dashboard HTML ──────────────────────────────────────────────────
+
+app.get('/', (_req, res) => {
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.send(DASHBOARD_HTML);
+});
+
 // ─── Health check ─────────────────────────────────────────────────────────────
 
 app.get('/health', (_req, res) => res.json({ ok: true, timestamp: Date.now() }));
+
+// ─── Dashboard HTML ──────────────────────────────────────────────────────────
+
+const DASHBOARD_HTML = `<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<title>OmniMem — Dashboard</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a1a; color: #e8e8e8;
+         margin: 0; padding: 24px; max-width: 1100px; margin: 0 auto; }
+  h1 { margin: 0 0 4px; font-size: 22px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 20px; }
+  .summary { display: flex; gap: 20px; margin-bottom: 24px; }
+  .stat { background: #232323; border: 1px solid #333; border-radius: 8px; padding: 12px 18px; flex: 1; }
+  .stat .v { font-size: 26px; font-weight: 600; color: #5dba5d; }
+  .stat .l { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+  table { width: 100%; border-collapse: collapse; background: #232323; border-radius: 8px; overflow: hidden; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #2e2e2e; font-size: 13px; }
+  th { background: #2a2a2a; color: #aaa; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  tr:last-child td { border-bottom: none; }
+  tr.topic-row { cursor: pointer; }
+  tr.topic-row:hover { background: #2a2a2a; }
+  .badge { display: inline-block; background: #333; color: #ccc; border-radius: 4px;
+           padding: 2px 7px; font-size: 11px; margin-right: 4px; }
+  .platform-codebase { background: #1e5f3f; color: #7ecfaa; }
+  .platform-Manual { background: #1f4d6d; color: #60b8f0; }
+  .browse { display: none; background: #1f1f1f; padding: 14px 18px; border-top: 1px solid #2e2e2e; }
+  .browse.open { display: block; }
+  .chunk { background: #2a2a2a; border-left: 3px solid #2471a3; padding: 8px 12px;
+           margin: 6px 0; border-radius: 4px; font-size: 12px; }
+  .chunk-meta { color: #888; font-size: 10px; margin-bottom: 4px; }
+  .chunk-text { white-space: pre-wrap; word-break: break-word; color: #ccc; max-height: 200px; overflow: auto; }
+  .err { color: #e05555; padding: 14px; background: #2a1a1a; border-radius: 6px; }
+  button.refresh { background: #2471a3; color: #fff; border: none; border-radius: 5px;
+                   padding: 6px 12px; cursor: pointer; font-size: 12px; }
+  a { color: #60b8f0; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<h1>🧠 OmniMem Dashboard</h1>
+<div class="sub">Riepilogo dei dati registrati su ChromaDB. <button class="refresh" onclick="loadStats()">↻ Aggiorna</button></div>
+<div id="root">Caricamento…</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let openTopic = null;
+
+function fmtDate(ts) {
+  if (!ts) return '—';
+  return new Date(ts).toLocaleString('it-IT');
+}
+
+function platformBadge(name, count) {
+  const cls = name === 'codebase' ? 'platform-codebase'
+            : name.startsWith('Manual') ? 'platform-Manual' : '';
+  return \`<span class="badge \${cls}">\${name} ×\${count}</span>\`;
+}
+
+async function loadStats() {
+  $('root').innerHTML = 'Caricamento…';
+  try {
+    const r = await fetch('/api/stats');
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error);
+
+    const summary = \`
+      <div class="summary">
+        <div class="stat"><div class="v">\${data.total_chunks}</div><div class="l">Chunk totali</div></div>
+        <div class="stat"><div class="v">\${data.total_topics}</div><div class="l">Argomenti</div></div>
+      </div>\`;
+
+    const rows = data.topics.map((t) => {
+      const platforms = Object.entries(t.platforms)
+        .sort((a, b) => b[1] - a[1])
+        .map(([p, c]) => platformBadge(p, c)).join('');
+      return \`
+        <tr class="topic-row" data-topic="\${encodeURIComponent(t.topic)}" onclick="toggleBrowse('\${encodeURIComponent(t.topic)}')">
+          <td><strong>\${t.topic}</strong></td>
+          <td>\${t.chunks}</td>
+          <td>\${platforms}</td>
+          <td>\${t.sources_count}</td>
+          <td>\${fmtDate(t.last_timestamp)}</td>
+          <td><a href="/api/export/\${encodeURIComponent(t.topic)}" onclick="event.stopPropagation()">⬇ MD</a></td>
+        </tr>
+        <tr><td colspan="6" class="browse" id="browse-\${encodeURIComponent(t.topic)}"></td></tr>\`;
+    }).join('');
+
+    $('root').innerHTML = summary + (data.topics.length === 0
+      ? '<p style="color:#888">Nessun dato registrato.</p>'
+      : \`<table>
+          <thead><tr><th>Argomento</th><th>Chunk</th><th>Piattaforme</th><th>Fonti</th><th>Ultimo aggiornamento</th><th></th></tr></thead>
+          <tbody>\${rows}</tbody>
+        </table>\`);
+  } catch (err) {
+    $('root').innerHTML = \`<div class="err">Errore: \${err.message}</div>\`;
+  }
+}
+
+async function toggleBrowse(topicEnc) {
+  const topic = decodeURIComponent(topicEnc);
+  const cell = $(\`browse-\${topicEnc}\`);
+  if (cell.classList.contains('open')) {
+    cell.classList.remove('open');
+    cell.innerHTML = '';
+    return;
+  }
+  cell.classList.add('open');
+  cell.innerHTML = '<em style="color:#888">Caricamento chunk…</em>';
+  try {
+    const r = await fetch(\`/api/browse?topic=\${topicEnc}&limit=20\`);
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error);
+    if (data.items.length === 0) { cell.innerHTML = '<em>Vuoto.</em>'; return; }
+
+    cell.innerHTML = data.items.map((it) => {
+      const m = it.meta ?? {};
+      const src = m.source_url ? \`<a href="\${m.source_url}" target="_blank">\${m.source_url}</a>\` : '';
+      return \`<div class="chunk">
+        <div class="chunk-meta">[\${m.platform ?? '?'}] \${fmtDate(m.timestamp)} \${src}</div>
+        <div class="chunk-text">\${escapeHtml(it.doc)}</div>
+      </div>\`;
+    }).join('') + (data.total > 20 ? \`<div style="color:#888;font-size:11px;margin-top:6px">Mostrati 20 di \${data.total}.</div>\` : '');
+  } catch (err) {
+    cell.innerHTML = \`<div class="err">Errore: \${err.message}</div>\`;
+  }
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+loadStats();
+</script>
+</body>
+</html>`;
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 

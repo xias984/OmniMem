@@ -1,13 +1,14 @@
-document.getElementById('toggle').addEventListener('click', () => {
-  chrome.tabs.query({ active: true, currentWindow: true }, ([tab]) => {
-    if (!tab) return;
-    chrome.tabs.sendMessage(tab.id, { action: 'togglePanel' }, () => {
-      if (chrome.runtime.lastError) {
-        // Content script non disponibile su questa pagina (chrome://, new tab, ecc.)
-        console.warn('[OmniMem]', chrome.runtime.lastError.message);
-      }
-    });
-    chrome.storage.local.set({ omnimemPanelOpen: true });
-    window.close();
+const toggle = document.getElementById('enabled');
+const status = document.getElementById('status');
+
+chrome.storage.local.get('omnimemPanelOpen', ({ omnimemPanelOpen }) => {
+  toggle.checked = !!omnimemPanelOpen;
+  status.textContent = omnimemPanelOpen ? 'Attiva su tutti i tab.' : 'Disattivata.';
+});
+
+toggle.addEventListener('change', () => {
+  const enabled = toggle.checked;
+  chrome.storage.local.set({ omnimemPanelOpen: enabled }, () => {
+    status.textContent = enabled ? 'Attiva su tutti i tab.' : 'Disattivata.';
   });
 });
