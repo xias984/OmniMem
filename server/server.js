@@ -615,41 +615,88 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <title>OmniMem — Dashboard</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 128 128'><defs><radialGradient id='n' cx='.5' cy='.5' r='.5'><stop offset='0' stop-color='%237fd47f'/><stop offset='1' stop-color='%233d9a3d'/></radialGradient></defs><rect width='128' height='128' rx='28' fill='%231f1f1f'/><g stroke='%235dba5d' stroke-width='5' stroke-linecap='round' opacity='.85'><line x1='64' y1='64' x2='32' y2='34'/><line x1='64' y1='64' x2='100' y2='38'/><line x1='64' y1='64' x2='36' y2='98'/><line x1='64' y1='64' x2='98' y2='96'/></g><g fill='url(%23n)'><circle cx='32' cy='34' r='12'/><circle cx='100' cy='38' r='12'/><circle cx='36' cy='98' r='12'/><circle cx='98' cy='96' r='12'/></g><circle cx='64' cy='64' r='22' fill='url(%23n)'/><circle cx='64' cy='64' r='9' fill='%23eaffea' opacity='.85'/></svg>">
 <style>
+  :root {
+    --bg: #141a16;
+    --bg-soft: #0f1a14;
+    --card: #1c2520;
+    --card-2: #232d27;
+    --border: #2a3530;
+    --border-soft: #1f2a24;
+    --text: #e6f0e8;
+    --muted: #8a9a90;
+    --accent: #5dba5d;
+    --accent-hi: #7fd47f;
+    --accent-lo: #3d9a3d;
+    --info: #60b8f0;
+    --info-bg: #1f3a4d;
+    --err: #e07070;
+    --err-bg: #2a1a1a;
+  }
   * { box-sizing: border-box; }
-  body { font-family: system-ui, -apple-system, sans-serif; background: #1a1a1a; color: #e8e8e8;
-         margin: 0; padding: 24px; max-width: 1100px; margin: 0 auto; }
-  h1 { margin: 0 0 4px; font-size: 22px; }
-  .sub { color: #888; font-size: 13px; margin-bottom: 20px; }
+  body { font-family: system-ui, -apple-system, sans-serif;
+         background: radial-gradient(ellipse at top, #1a2620 0%, var(--bg) 55%, var(--bg-soft) 100%);
+         color: var(--text); margin: 0; padding: 24px; max-width: 1100px; margin: 0 auto;
+         min-height: 100vh; }
+  h1 { margin: 0 0 4px; font-size: 22px; letter-spacing: 0.2px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
   .summary { display: flex; gap: 20px; margin-bottom: 24px; }
-  .stat { background: #232323; border: 1px solid #333; border-radius: 8px; padding: 12px 18px; flex: 1; }
-  .stat .v { font-size: 26px; font-weight: 600; color: #5dba5d; }
-  .stat .l { font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
-  table { width: 100%; border-collapse: collapse; background: #232323; border-radius: 8px; overflow: hidden; }
-  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #2e2e2e; font-size: 13px; }
-  th { background: #2a2a2a; color: #aaa; font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat { background: linear-gradient(180deg, var(--card) 0%, var(--card-2) 100%);
+          border: 1px solid var(--border); border-radius: 10px; padding: 14px 20px; flex: 1;
+          box-shadow: 0 1px 0 rgba(127,212,127,0.04) inset; }
+  .stat .v { font-size: 28px; font-weight: 600;
+             background: linear-gradient(180deg, var(--accent-hi), var(--accent));
+             -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .stat .l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; }
+  table { width: 100%; border-collapse: collapse; background: var(--card);
+          border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
+  th { background: var(--card-2); color: var(--muted); font-weight: 500; font-size: 11px;
+       text-transform: uppercase; letter-spacing: 0.6px; }
   tr:last-child td { border-bottom: none; }
-  tr.topic-row { cursor: pointer; }
-  tr.topic-row:hover { background: #2a2a2a; }
-  .badge { display: inline-block; background: #333; color: #ccc; border-radius: 4px;
+  tr.topic-row { cursor: pointer; transition: background 0.15s; }
+  tr.topic-row:hover { background: rgba(93,186,93,0.07); }
+  .badge { display: inline-block; background: #2a3530; color: #c5d4ca; border-radius: 4px;
            padding: 2px 7px; font-size: 11px; margin-right: 4px; }
-  .platform-codebase { background: #1e5f3f; color: #7ecfaa; }
-  .platform-Manual { background: #1f4d6d; color: #60b8f0; }
-  .browse { display: none; background: #1f1f1f; padding: 14px 18px; border-top: 1px solid #2e2e2e; }
+  .platform-codebase { background: rgba(93,186,93,0.18); color: var(--accent-hi);
+                       border: 1px solid rgba(93,186,93,0.3); }
+  .platform-Manual { background: var(--info-bg); color: var(--info);
+                     border: 1px solid rgba(96,184,240,0.25); }
+  .browse { display: none; background: var(--bg-soft); padding: 14px 18px;
+            border-top: 1px solid var(--border-soft); }
   .browse.open { display: block; }
-  .chunk { background: #2a2a2a; border-left: 3px solid #2471a3; padding: 8px 12px;
+  .chunk { background: var(--card-2); border-left: 3px solid var(--accent); padding: 8px 12px;
            margin: 6px 0; border-radius: 4px; font-size: 12px; }
-  .chunk-meta { color: #888; font-size: 10px; margin-bottom: 4px; }
-  .chunk-text { white-space: pre-wrap; word-break: break-word; color: #ccc; max-height: 200px; overflow: auto; }
-  .err { color: #e05555; padding: 14px; background: #2a1a1a; border-radius: 6px; }
-  button.refresh { background: #2471a3; color: #fff; border: none; border-radius: 5px;
-                   padding: 6px 12px; cursor: pointer; font-size: 12px; }
-  a { color: #60b8f0; text-decoration: none; }
-  a:hover { text-decoration: underline; }
+  .chunk-meta { color: var(--muted); font-size: 10px; margin-bottom: 4px; }
+  .chunk-text { white-space: pre-wrap; word-break: break-word; color: #cfd8d2;
+                max-height: 200px; overflow: auto; }
+  .err { color: var(--err); padding: 14px; background: var(--err-bg); border-radius: 6px;
+         border: 1px solid rgba(224,112,112,0.25); }
+  button.refresh { background: linear-gradient(180deg, var(--accent) 0%, var(--accent-lo) 100%);
+                   color: #0f1a14; border: none; border-radius: 6px; padding: 6px 14px;
+                   cursor: pointer; font-size: 12px; font-weight: 600;
+                   box-shadow: 0 1px 0 rgba(127,212,127,0.3) inset, 0 1px 4px rgba(0,0,0,0.3); }
+  button.refresh:hover { background: linear-gradient(180deg, var(--accent-hi) 0%, var(--accent) 100%); }
+  a { color: var(--accent-hi); text-decoration: none; }
+  a:hover { text-decoration: underline; color: #a3e8a3; }
+  ::selection { background: rgba(93,186,93,0.35); color: #fff; }
 </style>
 </head>
 <body>
-<h1>🧠 OmniMem Dashboard</h1>
+<h1 style="display:flex;align-items:center;gap:10px">
+<svg width="28" height="28" viewBox="0 0 128 128" aria-hidden="true">
+  <defs><radialGradient id="hn" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#7fd47f"/><stop offset="1" stop-color="#3d9a3d"/></radialGradient></defs>
+  <rect width="128" height="128" rx="28" fill="#1f1f1f"/>
+  <g stroke="#5dba5d" stroke-width="5" stroke-linecap="round" opacity=".85">
+    <line x1="64" y1="64" x2="32" y2="34"/><line x1="64" y1="64" x2="100" y2="38"/>
+    <line x1="64" y1="64" x2="36" y2="98"/><line x1="64" y1="64" x2="98" y2="96"/>
+  </g>
+  <g fill="url(#hn)"><circle cx="32" cy="34" r="12"/><circle cx="100" cy="38" r="12"/><circle cx="36" cy="98" r="12"/><circle cx="98" cy="96" r="12"/></g>
+  <circle cx="64" cy="64" r="22" fill="url(#hn)"/>
+  <circle cx="64" cy="64" r="9" fill="#eaffea" opacity=".85"/>
+</svg>
+OmniMem Dashboard</h1>
 <div class="sub">Riepilogo dei dati registrati su ChromaDB. <button class="refresh" onclick="loadStats()">↻ Aggiorna</button></div>
 <div id="root">Caricamento…</div>
 

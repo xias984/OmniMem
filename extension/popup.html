@@ -4,26 +4,29 @@
   <meta charset="UTF-8">
   <style>
     body { font-family: system-ui, sans-serif; width: 220px; padding: 14px; margin: 0;
-           background: #1a1a1a; color: #e8e8e8; }
+           background: linear-gradient(180deg, #1a2620 0%, #141a16 100%); color: #e6f0e8; }
     .row { display: flex; align-items: center; justify-content: space-between; }
     h1 { font-size: 14px; margin: 0; font-weight: 600; }
     .switch { position: relative; display: inline-block; width: 42px; height: 22px; }
     .switch input { opacity: 0; width: 0; height: 0; }
-    .slider { position: absolute; cursor: pointer; inset: 0; background: #444;
+    .slider { position: absolute; cursor: pointer; inset: 0; background: #2a3530;
               border-radius: 22px; transition: .2s; }
     .slider::before { position: absolute; content: ""; height: 16px; width: 16px;
                       left: 3px; top: 3px; background: #fff; border-radius: 50%;
                       transition: .2s; }
-    input:checked + .slider { background: #2471a3; }
+    input:checked + .slider { background: linear-gradient(180deg, #5dba5d, #3d9a3d); }
     input:checked + .slider::before { transform: translateX(20px); }
-    .status { font-size: 11px; color: #888; margin-top: 10px; line-height: 1.4; }
-    a { color: #60b8f0; text-decoration: none; }
-    a:hover { text-decoration: underline; }
+    .status { font-size: 11px; color: #8a9a90; margin-top: 10px; line-height: 1.4; }
+    a { color: #7fd47f; text-decoration: none; }
+    a:hover { text-decoration: underline; color: #a3e8a3; }
+    .logo { width: 20px; height: 20px; vertical-align: middle; margin-right: 6px; }
+    .title { display: flex; align-items: center; }
   </style>
+  <link rel="icon" type="image/png" href="icons/icon-32.png">
 </head>
 <body>
   <div class="row">
-    <h1>🧠 OmniMem</h1>
+    <h1 class="title"><img class="logo" src="icons/icon-32.png" alt=""> OmniMem</h1>
     <label class="switch">
       <input type="checkbox" id="enabled">
       <span class="slider"></span>
