@@ -28,12 +28,20 @@
         android:inputType="textPassword"
         android:layout_marginTop="8dp" />
 
-    <EditText
+    <AutoCompleteTextView
         android:id="@+id/field_topic"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:hint="@string/label_topic"
-        android:layout_marginTop="8dp" />
+        android:layout_marginTop="8dp"
+        android:completionThreshold="1" />
+
+    <Button
+        android:id="@+id/btn_refresh_topics"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/btn_refresh_topics"
+        android:layout_marginTop="4dp" />
 
     <Button
         android:id="@+id/btn_save"

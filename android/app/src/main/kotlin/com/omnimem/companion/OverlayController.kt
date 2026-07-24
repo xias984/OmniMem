@@ -120,14 +120,18 @@ class OverlayController(private val service: OmniMemAccessibilityService) {
     }
 
     private fun onRecClicked() {
-        val text = service.currentScreenText()
         val sourceApp = service.currentSourceApp()
-        if (text.isBlank()) {
+        val messages = service.currentMessages().ifEmpty {
+            service.currentScreenText().takeIf { it.isNotBlank() }?.let { listOf("screen" to it) }.orEmpty()
+        }
+        if (messages.isEmpty()) {
             toast("Niente testo leggibile a schermo.")
             return
         }
-        api.record(listOf("screen" to text), prefs.defaultTopic, sourceApp) { ok, error ->
-            mainHandler.post { toast(if (ok) "Salvato nella memoria." else "Errore: $error") }
+        api.record(messages, prefs.defaultTopic, sourceApp) { ok, error ->
+            mainHandler.post {
+                toast(if (ok) "Salvati ${messages.size} messaggi." else "Errore: $error")
+            }
         }
     }
 
@@ -151,7 +155,7 @@ class OverlayController(private val service: OmniMemAccessibilityService) {
                 val block = "--- CONTESTO DALLA TUA MEMORIA PERSONALE ---\n" +
                     chunks.joinToString("\n---\n") +
                     "\n--- FINE CONTESTO ---"
-                val ok = NodeInjector.prependContext(node, block)
+                val ok = NodeInjector.prependContext(service, node, block)
                 toast(if (ok) "Contesto inserito." else "Impossibile scrivere nel campo.")
             }
         }

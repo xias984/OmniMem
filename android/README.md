@@ -16,10 +16,12 @@ di auth già introdotto in `server/server.js`.
     `/api/record` con `platform` = nome del package dell'app sorgente.
   - **Inject** — legge il campo di testo attivo, interroga `/api/query` con
     quel testo come query, e prepende il contesto trovato nello stesso campo
-    (via `ACTION_SET_TEXT`), imitando `setPrompt()` nell'estensione Chrome.
+    (via `ACTION_SET_TEXT`, con fallback clipboard/`ACTION_PASTE`), imitando
+    `setPrompt()` nell'estensione Chrome.
 - `SettingsActivity` (schermata di avvio) configura: URL server (l'hostname
-  Tailscale del PC), token API, topic di default; e apre le impostazioni di
-  sistema per abilitare il servizio di accessibilità e il permesso overlay.
+  Tailscale del PC), token API, topic di default con autocomplete popolato
+  da `/api/topics`; e apre le impostazioni di sistema per abilitare il
+  servizio di accessibilità e il permesso overlay.
 
 ## Setup
 
@@ -39,12 +41,18 @@ di auth già introdotto in `server/server.js`.
   differenza di `scrollToLoadAll()` nell'estensione, l'Accessibility Service
   vede solo ciò che è renderizzato in quel momento. Serve scrollare
   manualmente e premere Rec più volte per catturare una chat lunga.
-- **Nessuna estrazione strutturata per ruolo** (utente/assistente): il testo
-  viene raccolto come blocco unico, non come lista di messaggi con `role`
-  come fa `extractMessages()` lato estensione.
-- **`ACTION_SET_TEXT` non funziona su tutti i widget** — alcune app con
-  campi custom o WebView ibride potrebbero rifiutare l'azione; un fallback
-  via clipboard + `ACTION_PASTE` non è ancora implementato.
+- **L'estrazione per messaggio è euristica, non affidabile al 100%**:
+  `NodeExtractor.extractMessages()` cerca un contenitore con più figli dello
+  stesso tipo con testo significativo (i "bubble" di una chat) e indovina il
+  ruolo (`user`/`assistant`) dall'allineamento orizzontale del bubble
+  rispetto al contenitore — una convenzione comune ma non universale tra le
+  app. Se l'euristica non trova un contenitore plausibile, ripiega su un
+  singolo messaggio `screen` con tutto il testo visibile.
+- **`ACTION_SET_TEXT` non funziona su tutti i widget** — per questo
+  `NodeInjector` ha un fallback via appunti + `ACTION_SET_SELECTION` +
+  `ACTION_PASTE` (cursore spostato a inizio campo, poi incolla solo il
+  blocco di contesto, senza duplicare il draft). Gli appunti originali
+  vengono ripristinati dopo qualche secondo.
 - **Non pensato per il Play Store**: `BIND_ACCESSIBILITY_SERVICE` e
   `SYSTEM_ALERT_WINDOW` richiedono review/prominent disclosure pesanti per
   un uso così ampio; distribuzione consigliata via APK sideload, coerente
@@ -62,12 +70,14 @@ lascia risolvere le dipendenze e compila un build di debug.
 
 ## Prossimi passi suggeriti
 
-- Selettore del topic collegato a `/api/topics` invece del campo libero in
-  `SettingsActivity`.
-- Fallback clipboard/`ACTION_PASTE` per l'iniezione quando `ACTION_SET_TEXT`
-  fallisce.
-- Estrazione per-messaggio (heuristica "children ripetuti" come il target
-  manuale dell'estensione) invece del blocco di testo unico.
-- Servizio in foreground con notifica persistente se si vuole rendere più
+- Servizio in foreground con notifica persistente, se si vuole rendere più
   visibile/affidabile la presenza dell'Accessibility Service su Android
-  recenti.
+  recenti (non implementato: gli Accessibility Service restano vivi di
+  norma senza bisogno di una foreground notification, ma su alcuni OEM
+  aggressivi nel kill dei processi in background può aiutare).
+- Tuning dell'euristica di `findMessageContainer()` (soglie `MIN_TEXT_LEN`,
+  `MIN_SIBLINGS`) se in pratica produce troppi falsi positivi/negativi su
+  app reali — richiede test su dispositivo, non verificabile da qui.
+- Persistenza locale delle ultime azioni Rec/Inject (solo per feedback
+  utente, i dati restano comunque tutti sul server) se il toast risulta
+  insufficiente come conferma.

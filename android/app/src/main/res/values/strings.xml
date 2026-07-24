@@ -5,6 +5,7 @@
     <string name="label_api_token">Token API (X-OmniMem-Token)</string>
     <string name="label_topic">Topic di default</string>
     <string name="btn_save">Salva</string>
+    <string name="btn_refresh_topics">Aggiorna elenco topic</string>
     <string name="btn_open_accessibility_settings">Abilita servizio di accessibilità</string>
     <string name="btn_open_overlay_settings">Consenti overlay su altre app</string>
 </resources>

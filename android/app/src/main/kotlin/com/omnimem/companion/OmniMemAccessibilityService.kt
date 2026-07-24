@@ -31,6 +31,8 @@ class OmniMemAccessibilityService : AccessibilityService() {
     fun currentEditableNode(): AccessibilityNodeInfo? =
         NodeExtractor.findFocusedEditable(rootInActiveWindow)
 
+    fun currentMessages(): List<Pair<String, String>> = NodeExtractor.extractMessages(rootInActiveWindow)
+
     fun currentScreenText(): String = NodeExtractor.extractScreenText(rootInActiveWindow)
 
     fun currentSourceApp(): String = rootInActiveWindow?.packageName?.toString() ?: "unknown"

@@ -36,6 +36,31 @@ class OmniMemApiClient(private val prefs: OmniMemPrefs) {
         return builder.build()
     }
 
+    fun listTopics(onResult: (List<String>?, String?) -> Unit) {
+        if (prefs.serverUrl.isBlank()) {
+            onResult(null, "Server URL non configurato")
+            return
+        }
+        client.newCall(request("/api/topics", null)).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                onResult(null, e.message ?: "Errore di rete")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    if (!it.isSuccessful) {
+                        onResult(null, "Server ${it.code}")
+                        return
+                    }
+                    val json = JSONObject(it.body?.string().orEmpty())
+                    val topicsJson = json.optJSONArray("topics") ?: JSONArray()
+                    val topics = (0 until topicsJson.length()).map { i -> topicsJson.getString(i) }
+                    onResult(topics, null)
+                }
+            }
+        })
+    }
+
     fun query(text: String, topic: String, k: Int = 4, onResult: (List<String>?, String?) -> Unit) {
         if (prefs.serverUrl.isBlank()) {
             onResult(null, "Server URL non configurato")
