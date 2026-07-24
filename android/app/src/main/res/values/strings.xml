@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">OmniMem Companion</string>
+    <string name="accessibility_service_description">Permette a OmniMem di leggere il testo a schermo e il campo di input attivo, per salvare contesto nella tua memoria personale e per inserirvi quello recuperato — solo quando premi i pulsanti del pannello flottante.</string>
+    <string name="label_server_url">URL server (es. http://100.x.x.x:3000)</string>
+    <string name="label_api_token">Token API (X-OmniMem-Token)</string>
+    <string name="label_topic">Topic di default</string>
+    <string name="btn_save">Salva</string>
+    <string name="btn_open_accessibility_settings">Abilita servizio di accessibilità</string>
+    <string name="btn_open_overlay_settings">Consenti overlay su altre app</string>
+</resources>

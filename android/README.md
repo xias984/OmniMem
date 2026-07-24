@@ -1,0 +1,73 @@
+# OmniMem Companion (Android)
+
+Scaffold iniziale del client mobile per OmniMem: un Accessibility Service +
+overlay flottante che riusa gli endpoint esistenti (`/api/query`,
+`/api/record`) del bridge server, senza modifiche server-side oltre al token
+di auth già introdotto in `server/server.js`.
+
+## Cosa fa
+
+- Al posto del content script Chrome (che legge/scrive il DOM della pagina),
+  usa un **Accessibility Service** per leggere/scrivere nell'albero
+  `AccessibilityNodeInfo` di qualunque app in foreground.
+- Un bottone flottante (overlay, visibile su tutte le app) si espande in un
+  mini-pannello con due azioni:
+  - **Rec** — cattura tutto il testo visibile a schermo e lo invia a
+    `/api/record` con `platform` = nome del package dell'app sorgente.
+  - **Inject** — legge il campo di testo attivo, interroga `/api/query` con
+    quel testo come query, e prepende il contesto trovato nello stesso campo
+    (via `ACTION_SET_TEXT`), imitando `setPrompt()` nell'estensione Chrome.
+- `SettingsActivity` (schermata di avvio) configura: URL server (l'hostname
+  Tailscale del PC), token API, topic di default; e apre le impostazioni di
+  sistema per abilitare il servizio di accessibilità e il permesso overlay.
+
+## Setup
+
+1. Apri `android/` in Android Studio (genera da sé il Gradle wrapper).
+2. Installa Tailscale sul PC dove gira il server e sul telefono; prendi
+   l'hostname/IP Tailscale del PC (es. `http://100.x.x.x:3000`).
+3. Se hai impostato `API_TOKEN` in `.env` sul server, usa lo stesso valore
+   qui in "Token API".
+4. Compila e installa l'app, apri OmniMem Companion, salva URL/token/topic,
+   poi tocca "Abilita servizio di accessibilità" e "Consenti overlay su
+   altre app" — entrambi richiedono conferma manuale nelle impostazioni di
+   sistema, non sono concedibili via codice.
+
+## Limiti noti / differenze rispetto all'estensione Chrome
+
+- **Rec cattura solo la schermata visibile**, non l'intera cronologia: a
+  differenza di `scrollToLoadAll()` nell'estensione, l'Accessibility Service
+  vede solo ciò che è renderizzato in quel momento. Serve scrollare
+  manualmente e premere Rec più volte per catturare una chat lunga.
+- **Nessuna estrazione strutturata per ruolo** (utente/assistente): il testo
+  viene raccolto come blocco unico, non come lista di messaggi con `role`
+  come fa `extractMessages()` lato estensione.
+- **`ACTION_SET_TEXT` non funziona su tutti i widget** — alcune app con
+  campi custom o WebView ibride potrebbero rifiutare l'azione; un fallback
+  via clipboard + `ACTION_PASTE` non è ancora implementato.
+- **Non pensato per il Play Store**: `BIND_ACCESSIBILITY_SERVICE` e
+  `SYSTEM_ALERT_WINDOW` richiedono review/prominent disclosure pesanti per
+  un uso così ampio; distribuzione consigliata via APK sideload, coerente
+  con la natura locale/personale del progetto.
+- **iOS non è coperto** da questo modulo — richiederebbe una Custom Keyboard
+  Extension separata (vedi discussione architetturale).
+
+## Non verificato in questo ambiente
+
+Il codice segue le API standard Android (AccessibilityService, WindowManager
+overlay, OkHttp) ed è stato validato per sintassi XML/Kotlin, ma **non è
+stato compilato**: questo container non ha l'Android SDK installato. Prima
+di installarlo su un dispositivo, apri il progetto in Android Studio,
+lascia risolvere le dipendenze e compila un build di debug.
+
+## Prossimi passi suggeriti
+
+- Selettore del topic collegato a `/api/topics` invece del campo libero in
+  `SettingsActivity`.
+- Fallback clipboard/`ACTION_PASTE` per l'iniezione quando `ACTION_SET_TEXT`
+  fallisce.
+- Estrazione per-messaggio (heuristica "children ripetuti" come il target
+  manuale dell'estensione) invece del blocco di testo unico.
+- Servizio in foreground con notifica persistente se si vuole rendere più
+  visibile/affidabile la presenza dell'Accessibility Service su Android
+  recenti.

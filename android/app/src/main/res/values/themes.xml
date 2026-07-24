@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.OmniMemCompanion" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/omnimem_accent</item>
+        <item name="colorPrimaryDark">@color/omnimem_bg</item>
+        <item name="colorAccent">@color/omnimem_accent</item>
+    </style>
+</resources>
