@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.MotionEvent
@@ -28,6 +29,18 @@ class OverlayController(private val service: OmniMemAccessibilityService) {
 
     fun show() {
         if (bubbleView != null) return
+        if (!Settings.canDrawOverlays(service)) {
+            // Se l'accessibility service viene abilitato prima del permesso
+            // overlay, evitiamo di far crashare WindowManager: il bottone
+            // comparirà al riavvio del servizio (basta ri-attivarlo dalle
+            // impostazioni di accessibilità) una volta concesso il permesso.
+            Toast.makeText(
+                service,
+                "Concedi il permesso \"disegna sopra altre app\" a OmniMem Companion, poi riattiva il servizio di accessibilità.",
+                Toast.LENGTH_LONG,
+            ).show()
+            return
+        }
         val bubble = LayoutInflater.from(service).inflate(R.layout.overlay_bubble, null)
 
         val params = WindowManager.LayoutParams(

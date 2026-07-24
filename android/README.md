@@ -37,6 +37,12 @@ di auth già introdotto in `server/server.js`.
 
 ## Limiti noti / differenze rispetto all'estensione Chrome
 
+- **Traffico cleartext (HTTP) abilitato globalmente** (`usesCleartextTraffic`
+  nel manifest): necessario perché l'URL server è configurabile liberamente
+  (Tailscale/LAN in HTTP semplice) e da Android 9 il traffico cleartext è
+  bloccato di default quando il `targetSdk` è ≥28. Se in futuro il server
+  gira dietro HTTPS (es. Tailscale Serve/Funnel), si può restringere con una
+  Network Security Config invece del flag globale.
 - **Rec cattura solo la schermata visibile**, non l'intera cronologia: a
   differenza di `scrollToLoadAll()` nell'estensione, l'Accessibility Service
   vede solo ciò che è renderizzato in quel momento. Serve scrollare

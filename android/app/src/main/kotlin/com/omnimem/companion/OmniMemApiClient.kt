@@ -1,5 +1,7 @@
 package com.omnimem.companion
 
+import android.os.Handler
+import android.os.Looper
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -129,9 +131,57 @@ class OmniMemApiClient(private val prefs: OmniMemPrefs) {
 
             override fun onResponse(call: Call, response: Response) {
                 response.use {
-                    onResult(it.isSuccessful, if (it.isSuccessful) null else "Server ${it.code}")
+                    if (!it.isSuccessful) {
+                        onResult(false, "Server ${it.code}")
+                        return
+                    }
+                    val jobId = JSONObject(it.body?.string().orEmpty()).optString("jobId")
+                    if (jobId.isBlank()) {
+                        onResult(true, null)
+                        return
+                    }
+                    pollJob(jobId, onResult)
                 }
             }
         })
+    }
+
+    // /api/record risponde subito con un jobId e processa in background
+    // (embedding + upsert su Chroma): un 200 iniziale non garantisce che il
+    // salvataggio sia riuscito, va atteso /api/progress/:jobId come fa già
+    // l'estensione Chrome.
+    private fun pollJob(jobId: String, onResult: (Boolean, String?) -> Unit, attempt: Int = 0) {
+        if (attempt >= MAX_POLL_ATTEMPTS) {
+            onResult(false, "Timeout in attesa del salvataggio")
+            return
+        }
+        client.newCall(request("/api/progress/$jobId", null)).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                onResult(false, e.message ?: "Errore di rete")
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use {
+                    if (!it.isSuccessful) {
+                        onResult(false, "Server ${it.code}")
+                        return
+                    }
+                    val json = JSONObject(it.body?.string().orEmpty())
+                    when (json.optString("status")) {
+                        "done" -> onResult(true, null)
+                        "error" -> onResult(false, json.optString("error", "Errore sconosciuto"))
+                        else -> Handler(Looper.getMainLooper()).postDelayed(
+                            { pollJob(jobId, onResult, attempt + 1) },
+                            POLL_INTERVAL_MS,
+                        )
+                    }
+                }
+            }
+        })
+    }
+
+    companion object {
+        private const val POLL_INTERVAL_MS = 500L
+        private const val MAX_POLL_ATTEMPTS = 40 // ~20s
     }
 }

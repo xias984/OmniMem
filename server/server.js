@@ -347,7 +347,10 @@ if (!API_TOKEN) {
 
 app.use('/api', (req, res, next) => {
   if (!API_TOKEN) return next();
-  if (req.get('X-OmniMem-Token') !== API_TOKEN) {
+  // Header per fetch/estensione/app, query string per i link di download
+  // della dashboard (un tag <a> non può impostare header custom).
+  const token = req.get('X-OmniMem-Token') ?? req.query.token;
+  if (token !== API_TOKEN) {
     return res.status(401).json({ error: 'Token mancante o non valido' });
   }
   next();
@@ -720,6 +723,31 @@ OmniMem Dashboard</h1>
 const $ = (id) => document.getElementById(id);
 let openTopic = null;
 
+// Se il server ha API_TOKEN impostato, /api/* risponde 401 senza il token:
+// lo chiediamo una volta e lo teniamo in localStorage per header e link.
+function getToken() { return localStorage.getItem('omnimem_token') || ''; }
+function setToken(t) { if (t) localStorage.setItem('omnimem_token', t); }
+
+function withToken(path) {
+  const token = getToken();
+  if (!token) return path;
+  const sep = path.includes('?') ? '&' : '?';
+  return \`\${path}\${sep}token=\${encodeURIComponent(token)}\`;
+}
+
+async function apiFetch(path) {
+  const token = getToken();
+  const r = await fetch(path, token ? { headers: { 'X-OmniMem-Token': token } } : undefined);
+  if (r.status === 401) {
+    const entered = prompt('Il server richiede un token API (X-OmniMem-Token). Inseriscilo per continuare:');
+    if (entered) {
+      setToken(entered);
+      return apiFetch(path);
+    }
+  }
+  return r;
+}
+
 function fmtDate(ts) {
   if (!ts) return '—';
   return new Date(ts).toLocaleString('it-IT');
@@ -734,7 +762,7 @@ function platformBadge(name, count) {
 async function loadStats() {
   $('root').innerHTML = 'Caricamento…';
   try {
-    const r = await fetch('/api/stats');
+    const r = await apiFetch('/api/stats');
     const data = await r.json();
     if (!r.ok) throw new Error(data.error);
 
@@ -755,7 +783,7 @@ async function loadStats() {
           <td>\${platforms}</td>
           <td>\${t.sources_count}</td>
           <td>\${fmtDate(t.last_timestamp)}</td>
-          <td><a href="/api/export/\${encodeURIComponent(t.topic)}" onclick="event.stopPropagation()">⬇ MD</a></td>
+          <td><a href="\${withToken('/api/export/' + encodeURIComponent(t.topic))}" onclick="event.stopPropagation()">⬇ MD</a></td>
         </tr>
         <tr><td colspan="6" class="browse" id="browse-\${encodeURIComponent(t.topic)}"></td></tr>\`;
     }).join('');
@@ -782,7 +810,7 @@ async function toggleBrowse(topicEnc) {
   cell.classList.add('open');
   cell.innerHTML = '<em style="color:#888">Caricamento chunk…</em>';
   try {
-    const r = await fetch(\`/api/browse?topic=\${topicEnc}&limit=20\`);
+    const r = await apiFetch(\`/api/browse?topic=\${topicEnc}&limit=20\`);
     const data = await r.json();
     if (!r.ok) throw new Error(data.error);
     if (data.items.length === 0) { cell.innerHTML = '<em>Vuoto.</em>'; return; }

@@ -9,7 +9,8 @@
         android:allowBackup="false"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
-        android:theme="@style/Theme.OmniMemCompanion">
+        android:theme="@style/Theme.OmniMemCompanion"
+        android:usesCleartextTraffic="true">
 
         <activity
             android:name=".SettingsActivity"
