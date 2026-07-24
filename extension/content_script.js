@@ -4,6 +4,12 @@
  */
 
 const SERVER_BASE = 'http://localhost:3000';
+// Se imposti API_TOKEN sul server, incolla qui lo stesso valore.
+const SERVER_TOKEN = '';
+
+function authHeaders(extra = {}) {
+  return SERVER_TOKEN ? { ...extra, 'X-OmniMem-Token': SERVER_TOKEN } : extra;
+}
 
 // ─── Platform registry ────────────────────────────────────────────────────────
 
@@ -233,7 +239,7 @@ function extractMessagesManual(container) {
 async function callServer(path, body) {
   const res = await fetch(`${SERVER_BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`Server ${res.status}: ${await res.text()}`);
@@ -345,7 +351,7 @@ async function recordChat(topic) {
   showProgress(0, messages.length);
   const pollInterval = setInterval(async () => {
     try {
-      const prog = await (await fetch(`${SERVER_BASE}/api/progress/${jobId}`)).json();
+      const prog = await (await fetch(`${SERVER_BASE}/api/progress/${jobId}`, { headers: authHeaders() })).json();
       if (prog.status === 'processing') {
         showProgress(prog.done, prog.total);
       } else if (prog.status === 'done') {
@@ -440,7 +446,7 @@ function hideProgress() {
 // ─── Topics loader ────────────────────────────────────────────────────────────
 
 async function deleteTopic(topic) {
-  const res = await fetch(`${SERVER_BASE}/api/topics/${encodeURIComponent(topic)}`, { method: 'DELETE' });
+  const res = await fetch(`${SERVER_BASE}/api/topics/${encodeURIComponent(topic)}`, { method: 'DELETE', headers: authHeaders() });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ?? 'Errore eliminazione');
   return data.deleted;
@@ -450,7 +456,7 @@ async function loadTopics() {
   const sel = document.getElementById('omnimem-topic');
   if (!sel) return;
   try {
-    const res = await fetch(`${SERVER_BASE}/api/topics`);
+    const res = await fetch(`${SERVER_BASE}/api/topics`, { headers: authHeaders() });
     const { topics } = await res.json();
     sel.innerHTML = '';
     for (const t of (topics.length ? topics : ['Generale'])) {
@@ -651,7 +657,7 @@ function buildUI() {
     showProgress(0, 1, 'Scansione file in corso…');
     const poll = setInterval(async () => {
       try {
-        const prog = await (await fetch(`${SERVER_BASE}/api/progress/${jobId}`)).json();
+        const prog = await (await fetch(`${SERVER_BASE}/api/progress/${jobId}`, { headers: authHeaders() })).json();
         if (prog.status === 'processing') {
           showProgress(prog.done, prog.total, `File ${prog.done}/${prog.total}…`);
         } else if (prog.status === 'done') {

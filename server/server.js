@@ -337,6 +337,22 @@ app.use(cors({ origin: true }));
 
 app.use(express.json({ limit: '20mb' }));
 
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+
+const API_TOKEN = process.env.API_TOKEN ?? '';
+
+if (!API_TOKEN) {
+  console.warn('[auth] API_TOKEN non impostato: le API sono raggiungibili senza autenticazione da chiunque arrivi al server in rete (es. via Tailscale). Impostalo in .env prima di esporre il server oltre localhost.');
+}
+
+app.use('/api', (req, res, next) => {
+  if (!API_TOKEN) return next();
+  if (req.get('X-OmniMem-Token') !== API_TOKEN) {
+    return res.status(401).json({ error: 'Token mancante o non valido' });
+  }
+  next();
+});
+
 // ─── POST /api/record ─────────────────────────────────────────────────────────
 
 app.post('/api/record', (req, res) => {
