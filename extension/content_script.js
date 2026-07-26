@@ -5,6 +5,20 @@
 
 const SERVER_BASE = 'http://localhost:3000';
 
+// Il token (se API_TOKEN è impostato sul server) si configura dal popup
+// dell'estensione ed è salvato in chrome.storage.local — non va scritto qui
+// nel sorgente, per non rischiare di committarlo per sbaglio.
+let serverToken = '';
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.omnimemServerToken) {
+    serverToken = changes.omnimemServerToken.newValue || '';
+  }
+});
+
+function authHeaders(extra = {}) {
+  return serverToken ? { ...extra, 'X-OmniMem-Token': serverToken } : extra;
+}
+
 // ─── Platform registry ────────────────────────────────────────────────────────
 
 function chatgptSetPrompt(box, text) {
@@ -233,7 +247,7 @@ function extractMessagesManual(container) {
 async function callServer(path, body) {
   const res = await fetch(`${SERVER_BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`Server ${res.status}: ${await res.text()}`);
@@ -345,7 +359,7 @@ async function recordChat(topic) {
   showProgress(0, messages.length);
   const pollInterval = setInterval(async () => {
     try {
-      const prog = await (await fetch(`${SERVER_BASE}/api/progress/${jobId}`)).json();
+      const prog = await (await fetch(`${SERVER_BASE}/api/progress/${jobId}`, { headers: authHeaders() })).json();
       if (prog.status === 'processing') {
         showProgress(prog.done, prog.total);
       } else if (prog.status === 'done') {
@@ -440,7 +454,7 @@ function hideProgress() {
 // ─── Topics loader ────────────────────────────────────────────────────────────
 
 async function deleteTopic(topic) {
-  const res = await fetch(`${SERVER_BASE}/api/topics/${encodeURIComponent(topic)}`, { method: 'DELETE' });
+  const res = await fetch(`${SERVER_BASE}/api/topics/${encodeURIComponent(topic)}`, { method: 'DELETE', headers: authHeaders() });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error ?? 'Errore eliminazione');
   return data.deleted;
@@ -450,7 +464,7 @@ async function loadTopics() {
   const sel = document.getElementById('omnimem-topic');
   if (!sel) return;
   try {
-    const res = await fetch(`${SERVER_BASE}/api/topics`);
+    const res = await fetch(`${SERVER_BASE}/api/topics`, { headers: authHeaders() });
     const { topics } = await res.json();
     sel.innerHTML = '';
     for (const t of (topics.length ? topics : ['Generale'])) {
@@ -651,7 +665,7 @@ function buildUI() {
     showProgress(0, 1, 'Scansione file in corso…');
     const poll = setInterval(async () => {
       try {
-        const prog = await (await fetch(`${SERVER_BASE}/api/progress/${jobId}`)).json();
+        const prog = await (await fetch(`${SERVER_BASE}/api/progress/${jobId}`, { headers: authHeaders() })).json();
         if (prog.status === 'processing') {
           showProgress(prog.done, prog.total, `File ${prog.done}/${prog.total}…`);
         } else if (prog.status === 'done') {
@@ -678,10 +692,17 @@ function removeUI() {
   document.getElementById('omnimem-panel')?.remove();
 }
 
-// Auto-build se attiva all'avvio della pagina
-chrome.storage.local.get('omnimemPanelOpen', ({ omnimemPanelOpen }) => {
-  if (omnimemPanelOpen) buildUI();
-});
+// Carica token e stato pannello in un'unica chiamata: buildUI() (che chiama
+// subito loadTopics()) deve partire solo dopo che serverToken è valorizzato,
+// altrimenti con auth attiva /api/topics risponde 401 prima che il token sia
+// pronto e il menu ricade silenziosamente su "Generale".
+chrome.storage.local.get(
+  ['omnimemServerToken', 'omnimemPanelOpen'],
+  ({ omnimemServerToken, omnimemPanelOpen }) => {
+    serverToken = omnimemServerToken || '';
+    if (omnimemPanelOpen) buildUI();
+  },
+);
 
 // Reagisce in tempo reale al toggle del popup su tutti i tab aperti
 chrome.storage.onChanged.addListener((changes, area) => {

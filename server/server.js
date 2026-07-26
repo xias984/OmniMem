@@ -112,7 +112,11 @@ async function ocrBase64(base64Image) {
 // ─── ID generation ────────────────────────────────────────────────────────────
 
 function makeId(metadata, chunkIndex) {
-  const base = `${metadata.source_url}_${chunkIndex}`;
+  // capture_id distingue registrazioni successive con lo stesso source_url
+  // (es. più "Rec" sulla stessa schermata mobile) — senza, l'upsert su Chroma
+  // sovrascriverebbe silenziosamente la registrazione precedente.
+  const captureId = metadata.capture_id ? `_${metadata.capture_id}` : '';
+  const base = `${metadata.source_url}${captureId}_${chunkIndex}`;
   return base.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
@@ -152,6 +156,7 @@ async function processRecord(body, jobId) {
       platform: metadata.platform ?? 'unknown',
       topic: topic ?? 'Generale',
       timestamp: metadata.timestamp ?? Date.now(),
+      ...(metadata.capture_id ? { capture_id: metadata.capture_id } : {}),
     }));
 
     await collection.upsert({ ids, embeddings, documents: chunks, metadatas });
@@ -336,6 +341,24 @@ const app = express();
 app.use(cors({ origin: true }));
 
 app.use(express.json({ limit: '20mb' }));
+
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+
+const API_TOKEN = process.env.API_TOKEN ?? '';
+
+if (!API_TOKEN) {
+  console.warn('[auth] API_TOKEN non impostato: le API sono raggiungibili senza autenticazione da chiunque arrivi al server in rete (es. via Tailscale). Impostalo in .env prima di esporre il server oltre localhost.');
+}
+
+app.use('/api', (req, res, next) => {
+  if (!API_TOKEN) return next();
+  // Solo header: una query string finisce in cronologia browser, log del
+  // server/proxy e URL copiati — niente fallback via ?token=.
+  if (req.get('X-OmniMem-Token') !== API_TOKEN) {
+    return res.status(401).json({ error: 'Token mancante o non valido' });
+  }
+  next();
+});
 
 // ─── POST /api/record ─────────────────────────────────────────────────────────
 
@@ -704,6 +727,26 @@ OmniMem Dashboard</h1>
 const $ = (id) => document.getElementById(id);
 let openTopic = null;
 
+// Se il server ha API_TOKEN impostato, /api/* risponde 401 senza il token:
+// lo chiediamo una volta e lo teniamo solo per la durata della scheda
+// (sessionStorage, non localStorage) — niente query string negli URL, per
+// non farlo finire in cronologia o log.
+function getToken() { return sessionStorage.getItem('omnimem_token') || ''; }
+function setToken(t) { if (t) sessionStorage.setItem('omnimem_token', t); }
+
+async function apiFetch(path) {
+  const token = getToken();
+  const r = await fetch(path, token ? { headers: { 'X-OmniMem-Token': token } } : undefined);
+  if (r.status === 401) {
+    const entered = prompt('Il server richiede un token API (X-OmniMem-Token). Inseriscilo per continuare:');
+    if (entered) {
+      setToken(entered);
+      return apiFetch(path);
+    }
+  }
+  return r;
+}
+
 function fmtDate(ts) {
   if (!ts) return '—';
   return new Date(ts).toLocaleString('it-IT');
@@ -718,7 +761,7 @@ function platformBadge(name, count) {
 async function loadStats() {
   $('root').innerHTML = 'Caricamento…';
   try {
-    const r = await fetch('/api/stats');
+    const r = await apiFetch('/api/stats');
     const data = await r.json();
     if (!r.ok) throw new Error(data.error);
 
@@ -739,7 +782,7 @@ async function loadStats() {
           <td>\${platforms}</td>
           <td>\${t.sources_count}</td>
           <td>\${fmtDate(t.last_timestamp)}</td>
-          <td><a href="/api/export/\${encodeURIComponent(t.topic)}" onclick="event.stopPropagation()">⬇ MD</a></td>
+          <td><a href="#" onclick="event.stopPropagation(); exportTopic('\${encodeURIComponent(t.topic)}'); return false;">⬇ MD</a></td>
         </tr>
         <tr><td colspan="6" class="browse" id="browse-\${encodeURIComponent(t.topic)}"></td></tr>\`;
     }).join('');
@@ -755,6 +798,24 @@ async function loadStats() {
   }
 }
 
+async function exportTopic(topicEnc) {
+  try {
+    const r = await apiFetch(\`/api/export/\${topicEnc}\`);
+    if (!r.ok) throw new Error(\`Server \${r.status}\`);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = \`\${decodeURIComponent(topicEnc).replace(/\\s+/g, '_')}.md\`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert(\`Errore export: \${err.message}\`);
+  }
+}
+
 async function toggleBrowse(topicEnc) {
   const topic = decodeURIComponent(topicEnc);
   const cell = $(\`browse-\${topicEnc}\`);
@@ -766,7 +827,7 @@ async function toggleBrowse(topicEnc) {
   cell.classList.add('open');
   cell.innerHTML = '<em style="color:#888">Caricamento chunk…</em>';
   try {
-    const r = await fetch(\`/api/browse?topic=\${topicEnc}&limit=20\`);
+    const r = await apiFetch(\`/api/browse?topic=\${topicEnc}&limit=20\`);
     const data = await r.json();
     if (!r.ok) throw new Error(data.error);
     if (data.items.length === 0) { cell.innerHTML = '<em>Vuoto.</em>'; return; }

@@ -1,0 +1,31 @@
+name: Android build
+
+on:
+  push:
+    branches: [main]
+    paths: ["android/**", ".github/workflows/android-build.yml"]
+  pull_request:
+    paths: ["android/**", ".github/workflows/android-build.yml"]
+
+jobs:
+  assemble-debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+        working-directory: android
+
+      - name: Assemble debug APK
+        run: ./gradlew assembleDebug --stacktrace
+        working-directory: android

@@ -260,6 +260,9 @@ memory-ext-ai/
 │   ├── content_script.js   # Logica estrazione e iniezione
 │   ├── popup.html          # UI popup toolbar
 │   └── popup.js            # Toggle pannello
+├── android/
+│   ├── app/                # Companion Android: Accessibility Service + overlay
+│   └── README.md           # Setup, limiti noti, prerequisiti (Tailscale, API_TOKEN)
 ├── mcp/
 │   ├── omnimem-mcp.js      # MCP server stdio per Claude Code
 │   └── package.json
