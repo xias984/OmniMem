@@ -3,12 +3,17 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test",
+    "graph:backfill": "node src/cli/graphBackfillCli.js",
+    "graph:bootstrap": "node src/cli/graphBootstrapCli.js"
   },
   "dependencies": {
     "chromadb": "^1.9.2",
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "tesseract.js": "^5.1.0"
+    "neo4j-driver": "^6.2.0",
+    "tesseract.js": "^5.1.0",
+    "zod": "^4.4.3"
   }
 }

@@ -1,0 +1,111 @@
+{
+  "description": "Dataset di valutazione per confrontare RAG vettoriale puro e Hybrid GraphRAG su OmniMem. Scenario di riferimento: progetto 'Hearthfall', che ha sostituito PixiJS con Unity WebGL per il prototipo grafico, con alcuni task bloccati e una contraddizione nota tra due sessioni di note.",
+  "namespace": "Hearthfall",
+  "fixture_note": "Le memorie sotto vanno indicizzate (Rec / API /api/record) prima di eseguire le query, con OMNIMEM_GRAPH_INDEXING_ENABLED=true, cosi' che il grafo contenga le entita'/decisioni citate.",
+  "seed_memories": [
+    {
+      "id": "mem_1",
+      "text": "[USER] Per il prototipo grafico di Hearthfall useremo PixiJS: e' leggero e va bene per un 2D semplice.",
+      "expected_decision": { "statement": "PixiJS per il prototipo grafico", "status": "active" }
+    },
+    {
+      "id": "mem_2",
+      "text": "[USER] Abbiamo scartato PixiJS perche' non regge bene le scene 3D che vogliamo aggiungere piu' avanti. Passiamo a Unity WebGL: e' piu' pesante ma ci copre anche il 3D. Unity WebGL sostituisce PixiJS per il prototipo grafico.",
+      "expected_entities": [{ "name": "Unity WebGL", "type": "technology", "aliases": ["Unity Web"] }],
+      "expected_relations": [{ "source": "Hearthfall", "relationship": "USES", "target": "Unity WebGL" }],
+      "expected_decision": { "statement": "Unity WebGL sostituisce PixiJS per il prototipo grafico", "status": "active", "supersedes": "PixiJS per il prototipo grafico" }
+    },
+    {
+      "id": "mem_3",
+      "text": "[USER] Il task 'Integrazione asset 3D' e' bloccato dal task 'Migrazione pipeline Unity', che non e' ancora completato.",
+      "expected_relations": [{ "source": "Integrazione asset 3D", "relationship": "BLOCKED_BY", "target": "Migrazione pipeline Unity" }]
+    },
+    {
+      "id": "mem_4",
+      "text": "[USER] Nota rapida di sessione: per Hearthfall stiamo ancora usando PixiJS in produzione, Unity WebGL e' solo un esperimento non confermato.",
+      "note": "Contraddice mem_2 (che dichiara Unity WebGL come sostituto attivo). Va rilevata come CONTRADICTS, non risolta automaticamente per data/confidence."
+    }
+  ],
+  "queries": [
+    {
+      "id": "q1",
+      "query": "Quale tecnologia è attualmente usata dal progetto Hearthfall?",
+      "category": "semantic",
+      "expected_chunks": ["mem_2"],
+      "expected_entities": ["Unity WebGL"],
+      "expected_relations": [],
+      "expected_active_decision": "Unity WebGL sostituisce PixiJS per il prototipo grafico",
+      "must_exclude": ["Presentare PixiJS come scelta corrente senza segnalare che e' superata"]
+    },
+    {
+      "id": "q2",
+      "query": "Perché è stata scartata la soluzione precedente?",
+      "category": "causal",
+      "expected_chunks": ["mem_2"],
+      "expected_entities": ["PixiJS", "Unity WebGL"],
+      "expected_relations": [{ "type": "SUPERSEDES" }],
+      "expected_active_decision": "Unity WebGL sostituisce PixiJS per il prototipo grafico",
+      "must_exclude": []
+    },
+    {
+      "id": "q3",
+      "query": "Quale decisione ha sostituito quella vecchia?",
+      "category": "decision",
+      "expected_chunks": ["mem_2"],
+      "expected_entities": ["Unity WebGL", "PixiJS"],
+      "expected_relations": [{ "type": "SUPERSEDES", "from": "Unity WebGL sostituisce PixiJS per il prototipo grafico", "to": "PixiJS per il prototipo grafico" }],
+      "expected_active_decision": "Unity WebGL sostituisce PixiJS per il prototipo grafico",
+      "must_exclude": ["Presentare 'PixiJS per il prototipo grafico' come decisione attiva"]
+    },
+    {
+      "id": "q4",
+      "query": "Da quali task dipende l'integrazione asset 3D?",
+      "category": "dependency",
+      "expected_chunks": ["mem_3"],
+      "expected_entities": ["Integrazione asset 3D", "Migrazione pipeline Unity"],
+      "expected_relations": [{ "type": "BLOCKED_BY", "from": "Integrazione asset 3D", "to": "Migrazione pipeline Unity" }],
+      "expected_active_decision": null,
+      "must_exclude": []
+    },
+    {
+      "id": "q5",
+      "query": "Quali problemi bloccano il progetto?",
+      "category": "dependency",
+      "expected_chunks": ["mem_3"],
+      "expected_entities": ["Migrazione pipeline Unity"],
+      "expected_relations": [{ "type": "BLOCKED_BY" }],
+      "expected_active_decision": null,
+      "must_exclude": []
+    },
+    {
+      "id": "q6",
+      "query": "Esistono memorie in contraddizione?",
+      "category": "contradiction",
+      "expected_chunks": ["mem_2", "mem_4"],
+      "expected_entities": ["Unity WebGL", "PixiJS"],
+      "expected_relations": [{ "type": "CONTRADICTS", "from": "mem_4", "to": "mem_2" }],
+      "expected_active_decision": "Unity WebGL sostituisce PixiJS per il prototipo grafico",
+      "must_exclude": ["Dichiarare quale delle due memorie sia 'vera' solo perche' piu' recente o con confidence piu' alta"]
+    },
+    {
+      "id": "q7",
+      "query": "Qual è la fonte di questa decisione?",
+      "category": "decision",
+      "expected_chunks": ["mem_2"],
+      "expected_entities": ["Unity WebGL"],
+      "expected_relations": [],
+      "expected_active_decision": "Unity WebGL sostituisce PixiJS per il prototipo grafico",
+      "must_exclude": []
+    },
+    {
+      "id": "q8",
+      "query": "Quali decisioni non sono più valide?",
+      "category": "decision",
+      "expected_chunks": ["mem_1"],
+      "expected_entities": ["PixiJS"],
+      "expected_relations": [{ "type": "SUPERSEDES" }],
+      "expected_active_decision": null,
+      "must_exclude": ["Presentare 'PixiJS per il prototipo grafico' come ancora attiva"]
+    }
+  ]
+}

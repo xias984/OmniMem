@@ -9,50 +9,71 @@
 
 import express from 'express';
 import cors from 'cors';
-import { ChromaClient } from 'chromadb';
 import Tesseract from 'tesseract.js';
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { join, extname, relative } from 'path';
+import { getCollection } from './src/chroma.js';
+import { embed, OLLAMA_BASE, EMBED_MODEL } from './src/embeddings.js';
+import { config as graphConfig } from './src/config.js';
+import { createGraphRuntime } from './src/graph/runtime.js';
+import { runBackfill } from './src/graph/backfill.js';
+import { embedOne } from './src/embeddings.js';
+import { hybridRetrieve } from './src/retrieval/hybridRetriever.js';
+import { buildContext } from './src/context/contextBuilder.js';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT ?? 3000;
-const COLLECTION_NAME = 'omnimem';
-const OLLAMA_BASE = process.env.OLLAMA_BASE ?? 'http://localhost:11434';
-const EMBED_MODEL = process.env.EMBED_MODEL ?? 'nomic-embed-text';
 const CHUNK_SIZE = 800;   // caratteri per chunk
 const CHUNK_OVERLAP = 80; // overlap per preservare contesto numerico
 
-// ─── ChromaDB ─────────────────────────────────────────────────────────────────
+// ─── GraphRAG runtime (dietro feature flag, no-op se disattivato) ────────────
 
-const CHROMA_URL = process.env.CHROMA_URL ?? 'http://localhost:8000';
-const chroma = new ChromaClient({ path: CHROMA_URL });
+const graphRuntime = createGraphRuntime(graphConfig);
 
-async function getCollection() {
-  return chroma.getOrCreateCollection({
-    name: COLLECTION_NAME,
-    metadata: { 'hnsw:space': 'cosine' },
-  });
+/** Backfill grafo dai chunk gia' in ChromaDB. Condiviso da CLI ed endpoint HTTP. */
+async function runGraphBackfill({ namespace = null, dryRun = false, limit } = {}) {
+  const collection = await getCollection();
+  const fetchChunksPage = async ({ namespace: ns, offset, limit: pageLimit }) => {
+    const where = ns ? { topic: { $eq: ns } } : undefined;
+    const results = await collection.get({ where, include: ['documents', 'metadatas'], limit: pageLimit, offset });
+    const ids = results.ids ?? [];
+    const docs = results.documents ?? [];
+    const metas = results.metadatas ?? [];
+    const items = ids.map((id, i) => ({ id, document: docs[i], metadata: metas[i] ?? {} }));
+    return { items, hasMore: items.length === pageLimit };
+  };
+
+  return runBackfill(
+    { namespace, dryRun, limit: limit ?? Infinity, batchSize: graphConfig.backfill.defaultBatchSize, extractorVersion: graphConfig.extractor.version },
+    {
+      fetchChunksPage,
+      graphRepo: graphRuntime.graphRepo,
+      extractor: graphRuntime.extractor,
+      embed: embedOne,
+      thresholds: graphConfig.entityResolution,
+      checkpointPath: graphConfig.backfill.checkpointPath,
+      logger: console,
+    }
+  );
 }
 
-// ─── Embedding via Ollama ─────────────────────────────────────────────────────
-
-async function embed(texts) {
-  const inputs = Array.isArray(texts) ? texts : [texts];
-  const embeddings = [];
-
-  for (const text of inputs) {
-    const res = await fetch(`${OLLAMA_BASE}/api/embeddings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: EMBED_MODEL, prompt: text }),
-    });
-    if (!res.ok) throw new Error(`Ollama embedding error: ${res.status}`);
-    const { embedding } = await res.json();
-    embeddings.push(embedding);
-  }
-
-  return embeddings;
+/** Esegue il retrieval ibrido + context builder per una query. Usato da /api/query in hybrid/shadow mode. */
+async function runHybridForQuery(queryText, namespace, k) {
+  const collection = await getCollection();
+  const retrieval = await hybridRetrieve(
+    { queryText, namespace: namespace ?? 'Generale', k },
+    {
+      vector: { embed, collection, distanceThreshold: 0.75 },
+      graphRepo: graphRuntime.graphRepo,
+      graphEnabled: graphRuntime.enabled || graphRuntime.shadowMode,
+      graphRetrieval: graphConfig.graphRetrieval,
+      scoring: graphConfig.scoring,
+      metrics: graphRuntime.metrics,
+    }
+  );
+  const context = buildContext({ query: queryText, namespace: namespace ?? 'Generale', retrieval }, graphConfig.contextBuilder);
+  return { retrieval, context };
 }
 
 // ─── Semantic chunking con overlap ────────────────────────────────────────────
@@ -160,6 +181,25 @@ async function processRecord(body, jobId) {
     }));
 
     await collection.upsert({ ids, embeddings, documents: chunks, metadatas });
+
+    // ── Dual write GraphRAG (best-effort, mai bloccante) ──────────────────
+    // Il salvataggio vettoriale sopra e' gia' completo: qualsiasi problema
+    // nell'indicizzazione grafo viene loggato dalla coda dedicata (con retry
+    // e dead-letter) ma non deve mai far fallire questo job.
+    try {
+      graphRuntime.enqueueIndexing({
+        namespace: metadata.namespace ?? topic ?? 'Generale',
+        memory: {
+          sourceUrl: metadata.source_url ?? '',
+          captureId: metadata.capture_id ?? null,
+          platform: metadata.platform ?? 'unknown',
+          topic: topic ?? 'Generale',
+        },
+        chunks: chunks.map((text, i) => ({ id: ids[i], text, timestamp: metadatas[i].timestamp })),
+      });
+    } catch (graphErr) {
+      console.error(`[omnimem:record] enqueue indicizzazione grafo fallito (ignorato):`, graphErr.message);
+    }
 
     job.status = 'done';
     job.chunks_saved = chunks.length;
@@ -417,7 +457,46 @@ app.post('/api/query', async (req, res) => {
       .filter(({ dist }) => dist <= 0.75)
       .map(({ doc, meta }) => `[${meta?.platform ?? '?'} — ${meta?.topic ?? '?'}]\n${doc}`);
 
-    res.json({ ok: true, chunks: filtered });
+    // ── GraphRAG (additivo, dietro feature flag) ──────────────────────────
+    // Comportamento di default (GraphRAG disattivato): responseBody resta
+    // identico a `{ ok: true, chunks: filtered }`, byte per byte come oggi.
+    let responseBody = { ok: true, chunks: filtered };
+
+    if (graphRuntime.enabled) {
+      try {
+        const { retrieval, context } = await runHybridForQuery(query, topic, k);
+        responseBody = {
+          ok: true,
+          chunks: retrieval.results.map((r) => `[${r.metadata?.platform ?? '?'} — ${topic ?? '?'}]\n${r.text}`),
+          graph: {
+            category: retrieval.category,
+            strategy: retrieval.strategy,
+            used_graph: retrieval.usedGraph,
+            fallback_to_vector: retrieval.fallbackToVector,
+          },
+          context,
+        };
+      } catch (err) {
+        console.error('[query] retrieval ibrido fallito, fallback al solo vettoriale:', err.message);
+        graphRuntime.metrics.increment('fallback_to_vector');
+      }
+    } else if (graphRuntime.shadowMode) {
+      // Shadow mode: esegue anche l'ibrido per confronto, ma la risposta
+      // all'utente resta quella vettoriale esistente.
+      try {
+        const { retrieval } = await runHybridForQuery(query, topic, k);
+        console.log(
+          `[shadow-mode] categoria=${retrieval.category} strategia=${retrieval.strategy} ` +
+          `vector_chunks=${filtered.length} hybrid_chunks=${retrieval.results.length} used_graph=${retrieval.usedGraph} ` +
+          `fallback=${retrieval.fallbackToVector}`
+        );
+        graphRuntime.metrics.increment('shadow_comparisons');
+      } catch (err) {
+        console.error('[shadow-mode] confronto grafo fallito (ignorato, risposta vettoriale invariata):', err.message);
+      }
+    }
+
+    res.json(responseBody);
   } catch (err) {
     console.error('[query]', err);
     res.status(500).json({ error: err.message });
@@ -618,6 +697,59 @@ app.get('/api/browse', async (req, res) => {
     console.error('[browse]', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ─── GET /api/graph/health ────────────────────────────────────────────────────
+// Endpoint additivo: stato di GraphRAG e di Neo4j. Non sostituisce /health.
+
+app.get('/api/graph/health', async (_req, res) => {
+  try {
+    const health = await graphRuntime.healthCheck();
+    res.json({
+      ok: true,
+      graphrag_enabled: graphRuntime.enabled,
+      graph_indexing_enabled: graphRuntime.indexingEnabled,
+      shadow_mode: graphRuntime.shadowMode,
+      neo4j: health,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── GET /api/graph/metrics ───────────────────────────────────────────────────
+// Metriche di osservabilita' GraphRAG (nessun contenuto, solo contatori/durate).
+
+app.get('/api/graph/metrics', (_req, res) => {
+  res.json({ ok: true, metrics: graphRuntime.metrics.snapshot() });
+});
+
+// ─── POST /api/graph/backfill ─────────────────────────────────────────────────
+// Avvia (in background) il backfill del grafo dai chunk gia' in ChromaDB.
+// Equivalente HTTP del comando CLI `npm run graph:backfill`.
+
+app.post('/api/graph/backfill', (req, res) => {
+  if (!graphRuntime.indexingEnabled) {
+    return res.status(400).json({ error: 'OMNIMEM_GRAPH_INDEXING_ENABLED e false: backfill non disponibile' });
+  }
+  const { namespace = null, dryRun = false, limit } = req.body ?? {};
+  const jobId = makeJobId();
+  jobs.set(jobId, { status: 'processing', done: 0, total: 0 });
+
+  (async () => {
+    const job = jobs.get(jobId);
+    try {
+      const summary = await runGraphBackfill({ namespace, dryRun, limit });
+      job.status = 'done';
+      job.summary = summary;
+    } catch (err) {
+      job.status = 'error';
+      job.error = err.message;
+    }
+    setTimeout(() => jobs.delete(jobId), 600_000);
+  })();
+
+  res.json({ ok: true, jobId });
 });
 
 // ─── GET / — Dashboard HTML ──────────────────────────────────────────────────
