@@ -273,6 +273,7 @@ async function processIngestCodebase(body, jobId) {
 
     const files = walkDir(rootPath, extSet);
     if (files.length === 0) {
+      console.warn(`[ingest-codebase] job ${jobId}: 0 file trovati in "${rootPath}" (extSet=${[...extSet].join(',')})`);
       job.status = 'done';
       job.chunks_saved = 0;
       return;
@@ -390,7 +391,7 @@ app.get('/api/progress/:jobId', (req, res) => {
 
 app.post('/api/query', async (req, res) => {
   try {
-    const { query, topic, k = 4 } = req.body;
+    const { query, topic, k = 12 } = req.body;
 
     if (!query) return res.status(400).json({ error: 'query mancante' });
 
@@ -411,11 +412,39 @@ app.post('/api/query', async (req, res) => {
     const distances = results.distances?.[0] ?? [];
     const metas = results.metadatas?.[0] ?? [];
 
-    // Filtra risultati con similarità coseno < 0.75 (distanza > 0.25)
-    const filtered = chunks
+    // Soglia permissiva (0.85) per recuperare anche match parziali.
+    // I chunk vengono raggruppati per source_url (così conversazioni intere
+    // non vengono mescolate), e all'interno del gruppo ordinati cronologicamente.
+    const surviving = chunks
       .map((doc, i) => ({ doc, dist: distances[i], meta: metas[i] }))
-      .filter(({ dist }) => dist <= 0.75)
-      .map(({ doc, meta }) => `[${meta?.platform ?? '?'} — ${meta?.topic ?? '?'}]\n${doc}`);
+      .filter(({ dist }) => dist <= 0.85);
+
+    const groups = new Map();
+    for (const item of surviving) {
+      const key = item.meta?.source_url ?? 'unknown';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+
+    // Ordina i chunk dentro ogni gruppo per timestamp; i gruppi tra loro
+    // per somiglianza media (gruppo migliore prima).
+    const groupArrays = [...groups.values()].map((items) => {
+      items.sort((a, b) => (a.meta?.timestamp ?? 0) - (b.meta?.timestamp ?? 0));
+      const avgDist = items.reduce((s, it) => s + it.dist, 0) / items.length;
+      return { items, avgDist };
+    });
+    groupArrays.sort((a, b) => a.avgDist - b.avgDist);
+
+    const filtered = [];
+    for (const { items } of groupArrays) {
+      for (const { doc, meta } of items) {
+        const platform = meta?.platform ?? '?';
+        const date = meta?.timestamp ? new Date(meta.timestamp).toISOString().slice(0, 10) : '?';
+        const src = meta?.file_path ?? meta?.source_url ?? '';
+        const srcLabel = src ? ` — ${src}` : '';
+        filtered.push(`[${platform} — ${date}${srcLabel}]\n${doc}`);
+      }
+    }
 
     res.json({ ok: true, chunks: filtered });
   } catch (err) {

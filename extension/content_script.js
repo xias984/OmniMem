@@ -386,7 +386,7 @@ async function injectContext(topic, currentQuery) {
 
   let result;
   try {
-    result = await callServer('/api/query', { query: currentQuery, topic, k: 4 });
+    result = await callServer('/api/query', { query: currentQuery, topic, k: 12 });
   } catch (err) {
     showStatus(`Errore query: ${err.message}`, 'error');
     return;
