@@ -9,9 +9,6 @@ const SERVER_BASE = 'http://localhost:3000';
 // dell'estensione ed è salvato in chrome.storage.local — non va scritto qui
 // nel sorgente, per non rischiare di committarlo per sbaglio.
 let serverToken = '';
-chrome.storage.local.get('omnimemServerToken', ({ omnimemServerToken }) => {
-  serverToken = omnimemServerToken || '';
-});
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'local' && changes.omnimemServerToken) {
     serverToken = changes.omnimemServerToken.newValue || '';
@@ -695,10 +692,17 @@ function removeUI() {
   document.getElementById('omnimem-panel')?.remove();
 }
 
-// Auto-build se attiva all'avvio della pagina
-chrome.storage.local.get('omnimemPanelOpen', ({ omnimemPanelOpen }) => {
-  if (omnimemPanelOpen) buildUI();
-});
+// Carica token e stato pannello in un'unica chiamata: buildUI() (che chiama
+// subito loadTopics()) deve partire solo dopo che serverToken è valorizzato,
+// altrimenti con auth attiva /api/topics risponde 401 prima che il token sia
+// pronto e il menu ricade silenziosamente su "Generale".
+chrome.storage.local.get(
+  ['omnimemServerToken', 'omnimemPanelOpen'],
+  ({ omnimemServerToken, omnimemPanelOpen }) => {
+    serverToken = omnimemServerToken || '';
+    if (omnimemPanelOpen) buildUI();
+  },
+);
 
 // Reagisce in tempo reale al toggle del popup su tutti i tab aperti
 chrome.storage.onChanged.addListener((changes, area) => {

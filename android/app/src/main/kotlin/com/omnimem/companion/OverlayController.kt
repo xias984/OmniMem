@@ -2,6 +2,7 @@ package com.omnimem.companion
 
 import android.content.Context
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -10,6 +11,7 @@ import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 import kotlin.math.abs
 
@@ -159,7 +161,7 @@ class OverlayController(private val service: OmniMemAccessibilityService) {
             return
         }
         val draft = node.text?.toString().orEmpty()
-        val sourceApp = service.currentSourceApp()
+        val targetSignature = TargetSignature.of(node)
         api.query(draft, prefs.defaultTopic) { chunks, error ->
             mainHandler.post {
                 if (chunks == null) {
@@ -172,12 +174,19 @@ class OverlayController(private val service: OmniMemAccessibilityService) {
                 }
 
                 // Tra l'avvio della query e questa callback l'utente può aver
-                // cambiato campo, schermata o app: rileggiamo il nodo con
-                // focus adesso e abortiamo se non corrisponde più, invece di
-                // scrivere alla cieca su un nodo potenzialmente stale.
+                // cambiato campo — anche restando nella stessa app (nuova
+                // conversazione, ricerca, ecc.) — o il testo può essere
+                // cambiato sotto lo stesso campo. In entrambi i casi il
+                // contesto recuperato non è più affidabile: meglio annullare
+                // che scrivere alla cieca su un target diverso da quello
+                // interrogato.
                 val freshNode = service.currentEditableNode()
-                if (freshNode == null || service.currentSourceApp() != sourceApp) {
+                if (freshNode == null || TargetSignature.of(freshNode) != targetSignature) {
                     toast("Campo cambiato nel frattempo, iniezione annullata.")
+                    return@post
+                }
+                if (freshNode.text?.toString().orEmpty() != draft) {
+                    toast("Testo cambiato nel frattempo: riprova Inject per un contesto aggiornato.")
                     return@post
                 }
 
@@ -191,4 +200,24 @@ class OverlayController(private val service: OmniMemAccessibilityService) {
     }
 
     private fun toast(msg: String) = Toast.makeText(service, msg, Toast.LENGTH_SHORT).show()
+
+    // Identifica il campo di destinazione al di là del solo package dell'app:
+    // stessa finestra, stesso resource id (quando presente — le WebView non
+    // ne hanno, da qui il fallback su classe + posizione a schermo) e stessi
+    // bounds. Basta che uno di questi cambi per considerare il target diverso
+    // da quello su cui era partita la query.
+    private data class TargetSignature(
+        val windowId: Int,
+        val viewId: String?,
+        val className: CharSequence?,
+        val bounds: Rect,
+    ) {
+        companion object {
+            fun of(node: AccessibilityNodeInfo): TargetSignature {
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
+                return TargetSignature(node.windowId, node.viewIdResourceName, node.className, rect)
+            }
+        }
+    }
 }
