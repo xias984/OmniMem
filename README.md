@@ -2,6 +2,8 @@
 
 Un sistema privato e locale per catturare conversazioni da qualsiasi AI web, indicizzarle in un database vettoriale e iniettarle come contesto in qualsiasi altra chat — senza che i tuoi dati lascino mai il PC.
 
+> 📦 **Installazione e avvio**: vedi [INSTALL.md](INSTALL.md) per la guida rapida a tutti i componenti (server, estensione Chrome, companion Android, MCP server).
+
 ---
 
 ## Architettura
