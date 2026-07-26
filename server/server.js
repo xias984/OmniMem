@@ -112,7 +112,11 @@ async function ocrBase64(base64Image) {
 // ─── ID generation ────────────────────────────────────────────────────────────
 
 function makeId(metadata, chunkIndex) {
-  const base = `${metadata.source_url}_${chunkIndex}`;
+  // capture_id distingue registrazioni successive con lo stesso source_url
+  // (es. più "Rec" sulla stessa schermata mobile) — senza, l'upsert su Chroma
+  // sovrascriverebbe silenziosamente la registrazione precedente.
+  const captureId = metadata.capture_id ? `_${metadata.capture_id}` : '';
+  const base = `${metadata.source_url}${captureId}_${chunkIndex}`;
   return base.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
@@ -152,6 +156,7 @@ async function processRecord(body, jobId) {
       platform: metadata.platform ?? 'unknown',
       topic: topic ?? 'Generale',
       timestamp: metadata.timestamp ?? Date.now(),
+      ...(metadata.capture_id ? { capture_id: metadata.capture_id } : {}),
     }));
 
     await collection.upsert({ ids, embeddings, documents: chunks, metadatas });
@@ -347,10 +352,9 @@ if (!API_TOKEN) {
 
 app.use('/api', (req, res, next) => {
   if (!API_TOKEN) return next();
-  // Header per fetch/estensione/app, query string per i link di download
-  // della dashboard (un tag <a> non può impostare header custom).
-  const token = req.get('X-OmniMem-Token') ?? req.query.token;
-  if (token !== API_TOKEN) {
+  // Solo header: una query string finisce in cronologia browser, log del
+  // server/proxy e URL copiati — niente fallback via ?token=.
+  if (req.get('X-OmniMem-Token') !== API_TOKEN) {
     return res.status(401).json({ error: 'Token mancante o non valido' });
   }
   next();
@@ -724,16 +728,11 @@ const $ = (id) => document.getElementById(id);
 let openTopic = null;
 
 // Se il server ha API_TOKEN impostato, /api/* risponde 401 senza il token:
-// lo chiediamo una volta e lo teniamo in localStorage per header e link.
-function getToken() { return localStorage.getItem('omnimem_token') || ''; }
-function setToken(t) { if (t) localStorage.setItem('omnimem_token', t); }
-
-function withToken(path) {
-  const token = getToken();
-  if (!token) return path;
-  const sep = path.includes('?') ? '&' : '?';
-  return \`\${path}\${sep}token=\${encodeURIComponent(token)}\`;
-}
+// lo chiediamo una volta e lo teniamo solo per la durata della scheda
+// (sessionStorage, non localStorage) — niente query string negli URL, per
+// non farlo finire in cronologia o log.
+function getToken() { return sessionStorage.getItem('omnimem_token') || ''; }
+function setToken(t) { if (t) sessionStorage.setItem('omnimem_token', t); }
 
 async function apiFetch(path) {
   const token = getToken();
@@ -783,7 +782,7 @@ async function loadStats() {
           <td>\${platforms}</td>
           <td>\${t.sources_count}</td>
           <td>\${fmtDate(t.last_timestamp)}</td>
-          <td><a href="\${withToken('/api/export/' + encodeURIComponent(t.topic))}" onclick="event.stopPropagation()">⬇ MD</a></td>
+          <td><a href="#" onclick="event.stopPropagation(); exportTopic('\${encodeURIComponent(t.topic)}'); return false;">⬇ MD</a></td>
         </tr>
         <tr><td colspan="6" class="browse" id="browse-\${encodeURIComponent(t.topic)}"></td></tr>\`;
     }).join('');
@@ -796,6 +795,24 @@ async function loadStats() {
         </table>\`);
   } catch (err) {
     $('root').innerHTML = \`<div class="err">Errore: \${err.message}</div>\`;
+  }
+}
+
+async function exportTopic(topicEnc) {
+  try {
+    const r = await apiFetch(\`/api/export/\${topicEnc}\`);
+    if (!r.ok) throw new Error(\`Server \${r.status}\`);
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = \`\${decodeURIComponent(topicEnc).replace(/\\s+/g, '_')}.md\`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    alert(\`Errore export: \${err.message}\`);
   }
 }
 

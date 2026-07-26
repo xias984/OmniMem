@@ -21,6 +21,13 @@
     a:hover { text-decoration: underline; color: #a3e8a3; }
     .logo { width: 20px; height: 20px; vertical-align: middle; margin-right: 6px; }
     .title { display: flex; align-items: center; }
+    .field { margin-top: 12px; }
+    .field label { display: block; font-size: 11px; color: #8a9a90; margin-bottom: 4px; }
+    .field input[type="password"] { width: 100%; box-sizing: border-box; background: #1c2520;
+      border: 1px solid #2a3530; color: #e6f0e8; border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+    .field button { margin-top: 6px; background: linear-gradient(180deg, #5dba5d, #3d9a3d);
+      color: #0f1a14; border: none; border-radius: 6px; padding: 5px 12px; font-size: 11px;
+      font-weight: 600; cursor: pointer; }
   </style>
   <link rel="icon" type="image/png" href="icons/icon-32.png">
 </head>
@@ -33,6 +40,11 @@
     </label>
   </div>
   <p class="status" id="status">Caricamento…</p>
+  <div class="field">
+    <label for="serverToken">Token API (se richiesto dal server)</label>
+    <input type="password" id="serverToken" autocomplete="off">
+    <button id="saveToken">Salva token</button>
+  </div>
   <p class="status">
     Dashboard: <a href="http://localhost:3000" target="_blank">localhost:3000</a><br>
     ChromaDB + Ollama devono essere attivi.

@@ -141,7 +141,11 @@ class OverlayController(private val service: OmniMemAccessibilityService) {
             toast("Niente testo leggibile a schermo.")
             return
         }
-        api.record(messages, prefs.defaultTopic, sourceApp) { ok, error ->
+        // Un capture_id univoco per pressione: senza, Rec ripetuti sulla
+        // stessa app riusano gli stessi ID lato server e ogni nuova
+        // registrazione sovrascrive silenziosamente quella precedente.
+        val captureId = "${System.currentTimeMillis()}_${(1000..9999).random()}"
+        api.record(messages, prefs.defaultTopic, sourceApp, captureId) { ok, error ->
             mainHandler.post {
                 toast(if (ok) "Salvati ${messages.size} messaggi." else "Errore: $error")
             }
@@ -155,6 +159,7 @@ class OverlayController(private val service: OmniMemAccessibilityService) {
             return
         }
         val draft = node.text?.toString().orEmpty()
+        val sourceApp = service.currentSourceApp()
         api.query(draft, prefs.defaultTopic) { chunks, error ->
             mainHandler.post {
                 if (chunks == null) {
@@ -165,10 +170,21 @@ class OverlayController(private val service: OmniMemAccessibilityService) {
                     toast("Nessun contesto rilevante trovato.")
                     return@post
                 }
+
+                // Tra l'avvio della query e questa callback l'utente può aver
+                // cambiato campo, schermata o app: rileggiamo il nodo con
+                // focus adesso e abortiamo se non corrisponde più, invece di
+                // scrivere alla cieca su un nodo potenzialmente stale.
+                val freshNode = service.currentEditableNode()
+                if (freshNode == null || service.currentSourceApp() != sourceApp) {
+                    toast("Campo cambiato nel frattempo, iniezione annullata.")
+                    return@post
+                }
+
                 val block = "--- CONTESTO DALLA TUA MEMORIA PERSONALE ---\n" +
                     chunks.joinToString("\n---\n") +
                     "\n--- FINE CONTESTO ---"
-                val ok = NodeInjector.prependContext(service, node, block)
+                val ok = NodeInjector.prependContext(service, freshNode, block)
                 toast(if (ok) "Contesto inserito." else "Impossibile scrivere nel campo.")
             }
         }

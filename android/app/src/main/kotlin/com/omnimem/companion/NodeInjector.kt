@@ -52,11 +52,17 @@ object NodeInjector {
 
         val pasted = node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
 
-        // Ripristina gli appunti originali dopo un attimo, per non lasciare
-        // il contesto (potenzialmente sensibile) in giro nella clipboard.
+        // Ripristina gli appunti originali dopo un attimo, ma solo se
+        // contengono ancora il testo che ci abbiamo messo noi: se nel
+        // frattempo l'utente ha copiato qualcos'altro, non lo sovrascriviamo.
         Handler(Looper.getMainLooper()).postDelayed({
             runCatching {
-                clipboard.setPrimaryClip(previousClip ?: ClipData.newPlainText("", ""))
+                val stillOurs = clipboard.primaryClip
+                    ?.takeIf { it.itemCount > 0 }
+                    ?.getItemAt(0)?.text?.toString() == text
+                if (stillOurs) {
+                    clipboard.setPrimaryClip(previousClip ?: ClipData.newPlainText("", ""))
+                }
             }
         }, CLIPBOARD_RESTORE_DELAY_MS)
 

@@ -27,8 +27,16 @@ class OmniMemApiClient(private val prefs: OmniMemPrefs) {
 
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
 
-    private fun request(path: String, body: JSONObject?): Request {
-        val builder = Request.Builder().url(prefs.serverUrl + path)
+    // Request.Builder().url() lancia IllegalArgumentException in modo
+    // sincrono (fuori dai callback OkHttp) se prefs.serverUrl è malformato:
+    // qui viene intercettata e trasformata in null, così i chiamanti possono
+    // riportare l'errore invece di far crashare il thread chiamante.
+    private fun request(path: String, body: JSONObject?): Request? {
+        val builder = try {
+            Request.Builder().url(prefs.serverUrl + path)
+        } catch (e: IllegalArgumentException) {
+            return null
+        }
         if (prefs.apiToken.isNotBlank()) {
             builder.addHeader("X-OmniMem-Token", prefs.apiToken)
         }
@@ -43,7 +51,11 @@ class OmniMemApiClient(private val prefs: OmniMemPrefs) {
             onResult(null, "Server URL non configurato")
             return
         }
-        client.newCall(request("/api/topics", null)).enqueue(object : Callback {
+        val req = request("/api/topics", null) ?: run {
+            onResult(null, "URL server non valido")
+            return
+        }
+        client.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 onResult(null, e.message ?: "Errore di rete")
             }
@@ -73,7 +85,11 @@ class OmniMemApiClient(private val prefs: OmniMemPrefs) {
             put("topic", topic)
             put("k", k)
         }
-        client.newCall(request("/api/query", body)).enqueue(object : Callback {
+        val req = request("/api/query", body) ?: run {
+            onResult(null, "URL server non valido")
+            return
+        }
+        client.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 onResult(null, e.message ?: "Errore di rete")
             }
@@ -97,6 +113,7 @@ class OmniMemApiClient(private val prefs: OmniMemPrefs) {
         messages: List<Pair<String, String>>,
         topic: String,
         sourceApp: String,
+        captureId: String,
         onResult: (Boolean, String?) -> Unit,
     ) {
         if (prefs.serverUrl.isBlank()) {
@@ -120,11 +137,19 @@ class OmniMemApiClient(private val prefs: OmniMemPrefs) {
                 JSONObject().apply {
                     put("platform", sourceApp)
                     put("source_url", "android://$sourceApp")
+                    // Distingue Rec successivi dalla stessa app: senza,
+                    // il server farebbe upsert sugli stessi ID e ogni nuova
+                    // cattura sovrascriverebbe silenziosamente la precedente.
+                    put("capture_id", captureId)
                     put("timestamp", System.currentTimeMillis())
                 },
             )
         }
-        client.newCall(request("/api/record", body)).enqueue(object : Callback {
+        val req = request("/api/record", body) ?: run {
+            onResult(false, "URL server non valido")
+            return
+        }
+        client.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 onResult(false, e.message ?: "Errore di rete")
             }
@@ -155,7 +180,11 @@ class OmniMemApiClient(private val prefs: OmniMemPrefs) {
             onResult(false, "Timeout in attesa del salvataggio")
             return
         }
-        client.newCall(request("/api/progress/$jobId", null)).enqueue(object : Callback {
+        val req = request("/api/progress/$jobId", null) ?: run {
+            onResult(false, "URL server non valido")
+            return
+        }
+        client.newCall(req).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
                 onResult(false, e.message ?: "Errore di rete")
             }

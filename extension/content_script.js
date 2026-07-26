@@ -4,11 +4,22 @@
  */
 
 const SERVER_BASE = 'http://localhost:3000';
-// Se imposti API_TOKEN sul server, incolla qui lo stesso valore.
-const SERVER_TOKEN = '';
+
+// Il token (se API_TOKEN è impostato sul server) si configura dal popup
+// dell'estensione ed è salvato in chrome.storage.local — non va scritto qui
+// nel sorgente, per non rischiare di committarlo per sbaglio.
+let serverToken = '';
+chrome.storage.local.get('omnimemServerToken', ({ omnimemServerToken }) => {
+  serverToken = omnimemServerToken || '';
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.omnimemServerToken) {
+    serverToken = changes.omnimemServerToken.newValue || '';
+  }
+});
 
 function authHeaders(extra = {}) {
-  return SERVER_TOKEN ? { ...extra, 'X-OmniMem-Token': SERVER_TOKEN } : extra;
+  return serverToken ? { ...extra, 'X-OmniMem-Token': serverToken } : extra;
 }
 
 // ─── Platform registry ────────────────────────────────────────────────────────

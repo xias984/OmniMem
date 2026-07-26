@@ -10,6 +10,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 class SettingsActivity : AppCompatActivity() {
 
@@ -31,7 +32,7 @@ class SettingsActivity : AppCompatActivity() {
         topicField.setText(prefs.defaultTopic)
 
         findViewById<Button>(R.id.btn_save).setOnClickListener {
-            prefs.serverUrl = serverUrlField.text.toString()
+            if (!saveServerUrl(serverUrlField.text.toString())) return@setOnClickListener
             prefs.apiToken = tokenField.text.toString()
             prefs.defaultTopic = topicField.text.toString().ifBlank { "Generale" }
             Toast.makeText(this, "Impostazioni salvate.", Toast.LENGTH_SHORT).show()
@@ -40,7 +41,7 @@ class SettingsActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btn_refresh_topics).setOnClickListener {
             // Salva URL/token correnti prima di interrogare il server, così
             // funziona anche se non hai ancora premuto "Salva".
-            prefs.serverUrl = serverUrlField.text.toString()
+            if (!saveServerUrl(serverUrlField.text.toString())) return@setOnClickListener
             prefs.apiToken = tokenField.text.toString()
             api.listTopics { topics, error ->
                 runOnUiThread {
@@ -68,5 +69,19 @@ class SettingsActivity : AppCompatActivity() {
                 ),
             )
         }
+    }
+
+    // Request.Builder().url() nel client HTTP lancia se l'URL è malformato:
+    // meglio rifiutarlo qui, con un messaggio chiaro, che farlo scoprire
+    // all'utente come crash al primo Rec/Inject.
+    private fun saveServerUrl(raw: String): Boolean {
+        val trimmed = raw.trim().trimEnd('/')
+        val parsed = trimmed.toHttpUrlOrNull()
+        if (parsed == null || (parsed.scheme != "http" && parsed.scheme != "https")) {
+            Toast.makeText(this, "URL server non valido (usa http:// o https://).", Toast.LENGTH_LONG).show()
+            return false
+        }
+        prefs.serverUrl = trimmed
+        return true
     }
 }

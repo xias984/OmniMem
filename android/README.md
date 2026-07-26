@@ -25,7 +25,8 @@ di auth già introdotto in `server/server.js`.
 
 ## Setup
 
-1. Apri `android/` in Android Studio (genera da sé il Gradle wrapper).
+1. Apri `android/` in Android Studio (il Gradle Wrapper è già incluso nel
+   repo — non serve generarlo).
 2. Installa Tailscale sul PC dove gira il server e sul telefono; prendi
    l'hostname/IP Tailscale del PC (es. `http://100.x.x.x:3000`).
 3. Se hai impostato `API_TOKEN` in `.env` sul server, usa lo stesso valore
@@ -58,7 +59,18 @@ di auth già introdotto in `server/server.js`.
   `NodeInjector` ha un fallback via appunti + `ACTION_SET_SELECTION` +
   `ACTION_PASTE` (cursore spostato a inizio campo, poi incolla solo il
   blocco di contesto, senza duplicare il draft). Gli appunti originali
-  vengono ripristinati dopo qualche secondo.
+  vengono ripristinati dopo qualche secondo, ma solo se nel frattempo
+  contengono ancora il testo inserito da OmniMem (altrimenti l'utente
+  potrebbe perdere qualcosa che ha copiato lui nel frattempo).
+- **Ogni `Rec` genera un `capture_id` univoco** (timestamp + numero
+  casuale), incluso nei metadata inviati a `/api/record`: il server lo usa
+  per derivare gli ID Chroma insieme a `source_url`, così Rec ripetuti sulla
+  stessa app (es. scrollando una chat lunga) non sovrascrivono le
+  registrazioni precedenti via `upsert`.
+- **`Inject` verifica di non scrivere su un campo/app diversi da quelli
+  della richiesta**: tra l'avvio della query e la risposta l'utente può
+  cambiare schermata — in quel caso l'iniezione viene annullata invece di
+  scrivere alla cieca su un nodo potenzialmente stale.
 - **Non pensato per il Play Store**: `BIND_ACCESSIBILITY_SERVICE` e
   `SYSTEM_ALERT_WINDOW` richiedono review/prominent disclosure pesanti per
   un uso così ampio; distribuzione consigliata via APK sideload, coerente
@@ -70,9 +82,16 @@ di auth già introdotto in `server/server.js`.
 
 Il codice segue le API standard Android (AccessibilityService, WindowManager
 overlay, OkHttp) ed è stato validato per sintassi XML/Kotlin, ma **non è
-stato compilato**: questo container non ha l'Android SDK installato. Prima
-di installarlo su un dispositivo, apri il progetto in Android Studio,
-lascia risolvere le dipendenze e compila un build di debug.
+stato compilato**: questo container non ha l'Android SDK installato (solo
+Gradle CLI, usato per generare il wrapper). C'è ora un workflow CI
+(`.github/workflows/android-build.yml`) che esegue `./gradlew assembleDebug`
+su ogni push/PR che tocca `android/` — è la prima verifica reale di
+compilazione, ma restano da fare su un dispositivo/emulatore vero:
+
+- due `Rec` consecutivi sulla stessa app (verificare che non si
+  sovrascrivano — vedi `capture_id` sopra);
+- `Inject` mentre si cambia campo/app durante l'attesa della risposta;
+- prova manuale su un `EditText` nativo e su un campo dentro una WebView.
 
 ## Prossimi passi suggeriti
 
