@@ -20,6 +20,7 @@ import { runBackfill } from './src/graph/backfill.js';
 import { embedOne } from './src/embeddings.js';
 import { hybridRetrieve } from './src/retrieval/hybridRetriever.js';
 import { buildContext } from './src/context/contextBuilder.js';
+import { groupAndFormatChunks } from './src/retrieval/chunkFormatting.js';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -486,32 +487,7 @@ app.post('/api/query', async (req, res) => {
       .map((doc, i) => ({ doc, dist: distances[i], meta: metas[i], id: chunkIds[i] }))
       .filter(({ dist }) => dist <= 0.85);
 
-    const groups = new Map();
-    for (const item of surviving) {
-      const key = item.meta?.source_url ?? 'unknown';
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push(item);
-    }
-
-    // Ordina i chunk dentro ogni gruppo per timestamp; i gruppi tra loro
-    // per somiglianza media (gruppo migliore prima).
-    const groupArrays = [...groups.values()].map((items) => {
-      items.sort((a, b) => (a.meta?.timestamp ?? 0) - (b.meta?.timestamp ?? 0));
-      const avgDist = items.reduce((s, it) => s + it.dist, 0) / items.length;
-      return { items, avgDist };
-    });
-    groupArrays.sort((a, b) => a.avgDist - b.avgDist);
-
-    const filtered = [];
-    for (const { items } of groupArrays) {
-      for (const { doc, meta } of items) {
-        const platform = meta?.platform ?? '?';
-        const date = meta?.timestamp ? new Date(meta.timestamp).toISOString().slice(0, 10) : '?';
-        const src = meta?.file_path ?? meta?.source_url ?? '';
-        const srcLabel = src ? ` — ${src}` : '';
-        filtered.push(`[${platform} — ${date}${srcLabel}]\n${doc}`);
-      }
-    }
+    const filtered = groupAndFormatChunks(surviving.map((s) => ({ doc: s.doc, meta: s.meta, sortValue: s.dist })));
 
     // ── GraphRAG (additivo, dietro feature flag) ──────────────────────────
     // Comportamento di default (GraphRAG disattivato): responseBody resta
@@ -530,7 +506,11 @@ app.post('/api/query', async (req, res) => {
         const { retrieval, context } = await runHybridForQuery(query, topic, k, seedChunks);
         responseBody = {
           ok: true,
-          chunks: retrieval.results.map((r) => `[${r.metadata?.platform ?? '?'} — ${topic ?? '?'}]\n${r.text}`),
+          // Stesso contratto di raggruppamento/ordine/provenienza del solo
+          // vettoriale: 1 - score cosi' "piu' basso = migliore" resta valido
+          // per il gruppo migliore anche quando l'ordine viene dallo scoring
+          // ibrido invece che dalla sola distanza coseno.
+          chunks: groupAndFormatChunks(retrieval.results.map((r) => ({ doc: r.text, meta: r.metadata, sortValue: 1 - r.score }))),
           graph: {
             category: retrieval.category,
             strategy: retrieval.strategy,
@@ -603,19 +583,17 @@ app.delete('/api/topics/:topic', async (req, res) => {
     await collection.delete({ ids });
     console.log(`[delete-topic] Eliminati ${ids.length} chunk per topic "${topic}"`);
 
-    // ── Cleanup GraphRAG (best-effort, mai bloccante) ──────────────────────
+    // ── Cleanup GraphRAG (best-effort ma con retry/dead-letter, mai bloccante) ──
     // Senza questo, un topic cancellato da ChromaDB lascerebbe entita',
     // decisioni e relazioni ancora interrogabili nel grafo: l'utente
     // vedrebbe risposte costruite su dati che ha esplicitamente rimosso.
-    if (graphRuntime.indexingEnabled && graphRuntime.graphRepo) {
-      try {
-        const graphDeleteResult = await graphRuntime.graphRepo.deleteNamespace(topic);
-        if (!graphDeleteResult.ok) {
-          console.error(`[delete-topic] pulizia Neo4j fallita per "${topic}" (ignorata):`, graphDeleteResult.error?.message);
-        }
-      } catch (graphErr) {
-        console.error(`[delete-topic] pulizia Neo4j fallita per "${topic}" (ignorata):`, graphErr.message);
-      }
+    // Gira ogni volta che un repository grafo esiste (non solo quando
+    // l'indicizzazione e' *attualmente* abilitata: puo' esserci stata
+    // popolata in passato), e usa la stessa coda con retry/dead-letter
+    // dell'indicizzazione, cosi' un fallimento Neo4j non fa divergere
+    // silenziosamente e per sempre i due datastore.
+    if (graphRuntime.graphRepo) {
+      graphRuntime.enqueueNamespaceDeletion(topic);
     }
 
     res.json({ ok: true, deleted: ids.length });

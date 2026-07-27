@@ -249,3 +249,127 @@ test('un fallimento nella scrittura di un Chunk o del suo CHUNK_OF abortisce com
   assert.equal(result.ok, false);
   assert.equal(result.stage, 'structural');
 });
+
+test('un fallimento nella scrittura di una entita dichiarata fa fallire il job (non solo la struttura)', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  const failingRepo = {
+    ...graphRepo,
+    upsertNode: async (label, props) => {
+      if (label === 'Entity') return { ok: false, error: new Error('upsert entita fallito') };
+      return graphRepo.upsertNode(label, props);
+    },
+    upsertRelation: graphRepo.upsertRelation.bind(graphRepo),
+    findEntity: graphRepo.findEntity.bind(graphRepo),
+    findEntitiesByAlias: graphRepo.findEntitiesByAlias.bind(graphRepo),
+    findEntitiesByType: graphRepo.findEntitiesByType.bind(graphRepo),
+  };
+  const extraction = {
+    ok: true,
+    data: {
+      entities: [{ temporary_id: 'e1', name: 'Unity WebGL', type: 'technology', aliases: [] }],
+      relations: [],
+      decisions: [],
+    },
+  };
+  const result = await indexMemoryIntoGraph(
+    { namespace: 'hearthfall', memory: baseMemory, chunks: baseChunks },
+    { graphRepo: failingRepo, extractor: fakeExtractor(extraction), thresholds, extractorVersion: 'v1' }
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, 'partial');
+});
+
+test('un fallimento nella scrittura di un arco MENTIONS fa fallire il job', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  const failingRepo = {
+    ...graphRepo,
+    upsertNode: graphRepo.upsertNode.bind(graphRepo),
+    upsertRelation: async (props) => {
+      if (props.type === 'MENTIONS') return { ok: false, error: new Error('upsert MENTIONS fallito') };
+      return graphRepo.upsertRelation(props);
+    },
+    findEntity: graphRepo.findEntity.bind(graphRepo),
+    findEntitiesByAlias: graphRepo.findEntitiesByAlias.bind(graphRepo),
+    findEntitiesByType: graphRepo.findEntitiesByType.bind(graphRepo),
+  };
+  const extraction = {
+    ok: true,
+    data: {
+      entities: [{ temporary_id: 'e1', name: 'Unity WebGL', type: 'technology', aliases: [] }],
+      relations: [],
+      decisions: [],
+    },
+  };
+  const result = await indexMemoryIntoGraph(
+    { namespace: 'hearthfall', memory: baseMemory, chunks: baseChunks },
+    { graphRepo: failingRepo, extractor: fakeExtractor(extraction), thresholds, extractorVersion: 'v1' }
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, 'partial');
+});
+
+test('un fallimento nella scrittura del nodo Decision fa fallire il job', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  const failingRepo = {
+    ...graphRepo,
+    upsertNode: async (label, props) => {
+      if (label === 'Decision') return { ok: false, error: new Error('upsert Decision fallito') };
+      return graphRepo.upsertNode(label, props);
+    },
+    upsertRelation: graphRepo.upsertRelation.bind(graphRepo),
+    findEntity: graphRepo.findEntity.bind(graphRepo),
+  };
+  const extraction = {
+    ok: true,
+    data: {
+      entities: [],
+      relations: [],
+      decisions: [{ statement: 'Nuova decisione', status: 'active', supersedes: null, confidence: 0.9, evidence_chunk_id: 'chunk_248' }],
+    },
+  };
+  const result = await indexMemoryIntoGraph(
+    { namespace: 'hearthfall', memory: baseMemory, chunks: baseChunks },
+    { graphRepo: failingRepo, extractor: fakeExtractor(extraction), thresholds, extractorVersion: 'v1' }
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, 'partial');
+});
+
+test('anche con un fallimento parziale, le scritture successive continuano (non si interrompe a meta memory)', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  let entityUpsertCalls = 0;
+  const failingRepo = {
+    ...graphRepo,
+    upsertNode: async (label, props) => {
+      if (label === 'Entity') {
+        entityUpsertCalls += 1;
+        if (entityUpsertCalls === 1) return { ok: false, error: new Error('primo upsert entita fallito') };
+      }
+      return graphRepo.upsertNode(label, props);
+    },
+    upsertRelation: graphRepo.upsertRelation.bind(graphRepo),
+    findEntity: graphRepo.findEntity.bind(graphRepo),
+    findEntitiesByAlias: graphRepo.findEntitiesByAlias.bind(graphRepo),
+    findEntitiesByType: graphRepo.findEntitiesByType.bind(graphRepo),
+  };
+  const extraction = {
+    ok: true,
+    data: {
+      entities: [
+        { temporary_id: 'e1', name: 'Unity WebGL', type: 'technology', aliases: [] },
+        { temporary_id: 'e2', name: 'PixiJS', type: 'technology', aliases: [] },
+      ],
+      relations: [],
+      decisions: [],
+    },
+  };
+  const result = await indexMemoryIntoGraph(
+    { namespace: 'hearthfall', memory: baseMemory, chunks: baseChunks },
+    { graphRepo: failingRepo, extractor: fakeExtractor(extraction), thresholds, extractorVersion: 'v1' }
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, 'partial');
+  // La seconda entita (PixiJS) deve comunque essere stata scritta, nonostante
+  // il fallimento sulla prima: il job fallisce nel complesso ma non si ferma.
+  assert.ok([...graphRepo.nodes.values()].some((n) => n.name === 'PixiJS'));
+});

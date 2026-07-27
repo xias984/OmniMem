@@ -116,14 +116,26 @@ pattern già usato per i job di embedding) che:
 
 Il fallimento di una qualsiasi fase 2-5 **non tocca** la struttura scritta
 al passo 1, e soprattutto non tocca in alcun modo il salvataggio vettoriale
-già avvenuto. In caso di fallimento definitivo (dopo i retry configurati),
-il job finisce in una dead-letter JSONL locale (`server/data/graph-dead-letter.jsonl`).
+già avvenuto. Ogni scrittura successiva alla struttura portante (entità,
+`MENTIONS`, decisioni, `DERIVED_FROM`, `SUPERSEDES`) viene comunque
+verificata: si continua a processare il resto della memory anche se una di
+loro fallisce (per non perdere le altre entità/relazioni estratte), ma il
+job nel suo complesso non viene mai dichiarato riuscito se anche una sola
+scrittura è fallita — la coda lo ritenta (idempotente, quindi sicuro anche
+per le scritture già andate a buon fine). In caso di fallimento definitivo
+(dopo i retry configurati), il job finisce in una dead-letter JSONL locale
+(`server/data/graph-dead-letter.jsonl`).
 
 Quando un topic viene cancellato (`DELETE /api/topics/:topic`), oltre ai
-chunk in ChromaDB viene ripulito (best-effort) anche il namespace
-corrispondente in Neo4j (`GraphRepository.deleteNamespace`): altrimenti
-entità, decisioni e relazioni di un topic esplicitamente rimosso resterebbero
-interrogabili dal retrieval ibrido.
+chunk in ChromaDB viene ripulito anche il namespace corrispondente in Neo4j
+(`GraphRepository.deleteNamespace`), accodato sulla stessa coda con
+retry/dead-letter dell'indicizzazione (`server/data/graph-delete-dead-letter.jsonl`)
+— gira ogni volta che un repository grafo esiste, non solo quando
+l'indicizzazione è *attualmente* abilitata, perché il grafo può essere
+stato popolato in passato con un flag diverso da quello corrente. Senza
+questo, entità, decisioni e relazioni di un topic esplicitamente rimosso
+resterebbero interrogabili dal retrieval ibrido, e un fallimento Neo4j
+isolato farebbe divergere silenziosamente e per sempre ChromaDB e il grafo.
 
 ## 4. Retrieval ibrido
 

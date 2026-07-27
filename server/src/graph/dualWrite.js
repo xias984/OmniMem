@@ -97,6 +97,19 @@ export async function indexMemoryIntoGraph(input, deps) {
   const knownChromaChunkIds = new Set(chunks.map((c) => c.id));
   const stats = emptyStats();
 
+  // Le scritture da qui in poi (entita', MENTIONS, decisioni, DERIVED_FROM,
+  // SUPERSEDES) arricchiscono il grafo ma non sono "portanti" come Memory/
+  // Chunk/CHUNK_OF: si continua a processare il resto anche se una fallisce,
+  // per non perdere le altre entita'/relazioni della stessa memory. Il job
+  // pero' NON viene dichiarato riuscito se anche una sola di queste scritture
+  // e' fallita: si ritenta l'intero job (idempotente, quindi sicuro anche per
+  // le scritture gia' andate a buon fine).
+  let firstFailure = null;
+  function noteFailure(result) {
+    if (!result.ok && !firstFailure) firstFailure = result.error;
+    return result;
+  }
+
   // ── 3. Entita' dichiarate esplicitamente dall'estrattore ──
   /** @type {Map<string,{id:string,label:string}>} nome (as-is) -> riferimento nel grafo */
   const nameToRef = new Map();
@@ -120,35 +133,35 @@ export async function indexMemoryIntoGraph(input, deps) {
         { merged_temporary_id: entity.temporary_id, merged_name: entity.name, reason: resolution.reason, at: new Date().toISOString() },
       ];
       // eslint-disable-next-line no-await-in-loop
-      await graphRepo.upsertNode(label, {
+      noteFailure(await graphRepo.upsertNode(label, {
         id: targetId,
         namespace,
         type: entity.type,
         name: resolution.matchedEntity?.name ?? entity.name,
         aliases: mergedAliases,
         metadata: { ...(resolution.matchedEntity?.metadata ?? {}), merge_history: mergeHistory },
-      });
+      }));
     } else if (resolution.decision === 'possible_duplicate') {
       stats.possible_duplicates += 1;
       // eslint-disable-next-line no-await-in-loop
-      await graphRepo.upsertNode(label, {
+      noteFailure(await graphRepo.upsertNode(label, {
         id: targetId,
         namespace,
         type: entity.type,
         name: entity.name,
         aliases: entity.aliases,
         metadata: { possible_duplicate_of: resolution.candidateEntityId, possible_duplicate_score: resolution.score },
-      });
+      }));
     } else if (resolution.decision === 'new_entity') {
       // eslint-disable-next-line no-await-in-loop
-      await graphRepo.upsertNode(label, {
+      noteFailure(await graphRepo.upsertNode(label, {
         id: targetId,
         namespace,
         type: entity.type,
         name: entity.name,
         aliases: entity.aliases,
         metadata: {},
-      });
+      }));
     }
     // exact_match: nodo gia' presente e identico, nessuna scrittura necessaria.
 
@@ -160,7 +173,7 @@ export async function indexMemoryIntoGraph(input, deps) {
     // compare anche come source/target di una relazione.
     for (const cid of chunkGraphIds.values()) {
       // eslint-disable-next-line no-await-in-loop
-      await graphRepo.upsertRelation({
+      noteFailure(await graphRepo.upsertRelation({
         fromLabel: 'Chunk',
         fromId: cid,
         toLabel: label,
@@ -170,7 +183,7 @@ export async function indexMemoryIntoGraph(input, deps) {
         confidence: 1,
         sourceChunkIds: [cid],
         extractorVersion,
-      });
+      }));
     }
 
     nameToRef.set(entity.name, { id: targetId, label });
@@ -185,7 +198,7 @@ export async function indexMemoryIntoGraph(input, deps) {
       { graphRepo, embed, thresholds }
     );
     if (resolution.decision === 'new_entity' || resolution.decision === 'possible_duplicate') {
-      await graphRepo.upsertNode('Entity', {
+      noteFailure(await graphRepo.upsertNode('Entity', {
         id: resolution.entityId,
         namespace,
         type: 'other',
@@ -194,7 +207,7 @@ export async function indexMemoryIntoGraph(input, deps) {
         metadata: resolution.decision === 'possible_duplicate'
           ? { possible_duplicate_of: resolution.candidateEntityId, possible_duplicate_score: resolution.score }
           : {},
-      });
+      }));
     }
     const ref = { id: resolution.entityId, label: 'Entity' };
     nameToRef.set(name, ref);
@@ -219,7 +232,7 @@ export async function indexMemoryIntoGraph(input, deps) {
     // gia' dichiarate e' un'unione idempotente con l'arco gia' creato sopra.
     for (const ref of [fromRef, toRef]) {
       // eslint-disable-next-line no-await-in-loop
-      await graphRepo.upsertRelation({
+      noteFailure(await graphRepo.upsertRelation({
         fromLabel: 'Chunk',
         fromId: evidenceGraphChunkId,
         toLabel: ref.label,
@@ -229,11 +242,11 @@ export async function indexMemoryIntoGraph(input, deps) {
         confidence: relation.confidence,
         sourceChunkIds: [evidenceGraphChunkId],
         extractorVersion,
-      });
+      }));
     }
 
     // eslint-disable-next-line no-await-in-loop
-    const result = await graphRepo.upsertRelation({
+    const result = noteFailure(await graphRepo.upsertRelation({
       fromLabel: fromRef.label,
       fromId: fromRef.id,
       toLabel: toRef.label,
@@ -244,7 +257,7 @@ export async function indexMemoryIntoGraph(input, deps) {
       sourceChunkIds: [evidenceGraphChunkId],
       extractorVersion,
       metadata: { description: relation.description },
-    });
+    }));
     if (result.ok) stats.relations_extracted += 1;
     else stats.relations_rejected += 1;
   }
@@ -256,7 +269,7 @@ export async function indexMemoryIntoGraph(input, deps) {
     const evidenceGraphChunkId = chunkGraphIds.get(decision.evidence_chunk_id);
 
     // eslint-disable-next-line no-await-in-loop
-    await graphRepo.upsertNode('Decision', {
+    noteFailure(await graphRepo.upsertNode('Decision', {
       id: did,
       namespace,
       type: 'decision',
@@ -264,9 +277,9 @@ export async function indexMemoryIntoGraph(input, deps) {
       status: decision.status,
       confidence: decision.confidence,
       metadata: { evidence_chunk_id: decision.evidence_chunk_id },
-    });
+    }));
     // eslint-disable-next-line no-await-in-loop
-    await graphRepo.upsertRelation({
+    noteFailure(await graphRepo.upsertRelation({
       fromLabel: 'Decision',
       fromId: did,
       toLabel: 'Chunk',
@@ -276,7 +289,7 @@ export async function indexMemoryIntoGraph(input, deps) {
       confidence: decision.confidence,
       sourceChunkIds: [evidenceGraphChunkId],
       extractorVersion,
-    });
+    }));
     stats.decisions_extracted += 1;
 
     if (decision.supersedes) {
@@ -287,19 +300,19 @@ export async function indexMemoryIntoGraph(input, deps) {
         // Crea uno stub: l'arco SUPERSEDES deve avere un target valido, ma non
         // inventiamo contenuto oltre al riferimento testuale gia' fornito.
         // eslint-disable-next-line no-await-in-loop
-        await graphRepo.upsertNode('Decision', {
+        noteFailure(await graphRepo.upsertNode('Decision', {
           id: oldId, namespace, type: 'decision', name: decision.supersedes, status: 'historical', confidence: 0,
           metadata: { stub: true },
-        });
+        }));
       } else if (oldExisting.status === 'active') {
         // eslint-disable-next-line no-await-in-loop
-        await graphRepo.upsertNode('Decision', {
+        noteFailure(await graphRepo.upsertNode('Decision', {
           id: oldId, namespace, type: 'decision', name: oldExisting.name, status: 'superseded',
           confidence: oldExisting.confidence, metadata: oldExisting.metadata,
-        });
+        }));
       }
       // eslint-disable-next-line no-await-in-loop
-      await graphRepo.upsertRelation({
+      noteFailure(await graphRepo.upsertRelation({
         fromLabel: 'Decision',
         fromId: did,
         toLabel: 'Decision',
@@ -309,7 +322,7 @@ export async function indexMemoryIntoGraph(input, deps) {
         confidence: decision.confidence,
         sourceChunkIds: [evidenceGraphChunkId],
         extractorVersion,
-      });
+      }));
     }
   }
 
@@ -317,6 +330,11 @@ export async function indexMemoryIntoGraph(input, deps) {
   metrics.increment('relations_extracted', stats.relations_extracted);
   metrics.increment('entity_merges', stats.entity_merges);
   metrics.increment('possible_duplicates', stats.possible_duplicates);
+
+  if (firstFailure) {
+    metrics.increment('graph_failures');
+    return { ok: false, stage: 'partial', error: firstFailure, stats };
+  }
 
   return { ok: true, stats };
 }

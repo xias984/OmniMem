@@ -90,6 +90,7 @@ export function loadConfig(env = process.env) {
       maxRetries: num(env.OMNIMEM_GRAPH_QUEUE_MAX_RETRIES, 3),
       retryDelayMs: num(env.OMNIMEM_GRAPH_QUEUE_RETRY_DELAY_MS, 1000),
       deadLetterPath: env.OMNIMEM_GRAPH_DEAD_LETTER_PATH ?? 'data/graph-dead-letter.jsonl',
+      deleteDeadLetterPath: env.OMNIMEM_GRAPH_DELETE_DEAD_LETTER_PATH ?? 'data/graph-delete-dead-letter.jsonl',
     },
 
     // ── Backfill ──────────────────────────────────────────────────────────

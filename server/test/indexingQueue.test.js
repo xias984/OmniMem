@@ -4,6 +4,7 @@ import { rm, readFile, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GraphIndexingQueue } from '../src/graph/indexingQueue.js';
+import { InMemoryGraphRepo } from './support/inMemoryGraphRepo.js';
 
 function silentLogger() {
   return { error() {} };
@@ -90,4 +91,36 @@ test('i job vengono processati in sequenza, uno alla volta', async () => {
   queue.enqueue({ id: 2 });
   await queue.drain();
   assert.deepEqual(order, ['start:1', 'end:1', 'start:2', 'end:2']);
+});
+
+test('la stessa coda riusata per la cancellazione di un namespace ritenta e finisce in dead-letter se il repository fallisce sempre', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  let calls = 0;
+  const brokenRepo = {
+    ...graphRepo,
+    deleteNamespace: async () => { calls += 1; return { ok: false, error: new Error('Neo4j giu') }; },
+  };
+  const queue = new GraphIndexingQueue({
+    runJob: (job) => brokenRepo.deleteNamespace(job.namespace),
+    maxRetries: 2,
+    retryDelayMs: 1,
+    logger: silentLogger(),
+    sleep: async () => {},
+  });
+  const result = await queue.enqueue({ namespace: 'hearthfall' });
+  assert.equal(result.ok, false);
+  assert.equal(calls, 3); // tentativo iniziale + 2 retry
+});
+
+test('la cancellazione di un namespace riesce quando il repository funziona', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  await graphRepo.upsertNode('Entity', { id: 'e1', namespace: 'hearthfall', name: 'Unity' });
+  const queue = new GraphIndexingQueue({
+    runJob: (job) => graphRepo.deleteNamespace(job.namespace),
+    maxRetries: 0,
+    logger: silentLogger(),
+  });
+  const result = await queue.enqueue({ namespace: 'hearthfall' });
+  assert.equal(result.ok, true);
+  assert.equal(await graphRepo.findEntity('hearthfall', 'e1'), null);
 });

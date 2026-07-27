@@ -22,6 +22,7 @@ function noopRuntime(reason) {
     metrics: new MetricsCollector(),
     reason,
     enqueueIndexing() {},
+    enqueueNamespaceDeletion() {},
     async healthCheck() {
       return { healthy: false, reason };
     },
@@ -55,6 +56,17 @@ export function createGraphRuntime(cfg) {
     metrics,
   });
 
+  // Coda separata per la cancellazione di un namespace (DELETE /api/topics/:topic):
+  // stesso pattern di retry/dead-letter dell'indicizzazione, cosi' un fallimento
+  // Neo4j non lascia silenziosamente ChromaDB e il grafo divergenti per sempre.
+  const deleteQueue = new GraphIndexingQueue({
+    runJob: (job) => graphRepo.deleteNamespace(job.namespace),
+    maxRetries: cfg.indexingQueue.maxRetries,
+    retryDelayMs: cfg.indexingQueue.retryDelayMs,
+    deadLetterPath: cfg.indexingQueue.deleteDeadLetterPath,
+    metrics,
+  });
+
   return {
     enabled: cfg.graphRagEnabled,
     indexingEnabled: cfg.graphIndexingEnabled,
@@ -69,6 +81,19 @@ export function createGraphRuntime(cfg) {
       queue.enqueue(job).catch((err) => {
         metrics.increment('graph_failures');
         console.error(`[graph-runtime] enqueue fallito: ${err.message}`);
+      });
+    },
+    /**
+     * Accoda la cancellazione di un namespace nel grafo. A differenza di
+     * `enqueueIndexing`, gira ogni volta che il grafo e' potenzialmente
+     * popolato (un repository esiste), non solo quando l'indicizzazione e'
+     * attualmente abilitata: dati possono essere stati scritti in passato
+     * anche se il flag e' stato disattivato nel frattempo.
+     */
+    enqueueNamespaceDeletion(namespace) {
+      deleteQueue.enqueue({ namespace }).catch((err) => {
+        metrics.increment('graph_failures');
+        console.error(`[graph-runtime] enqueue cancellazione namespace fallito: ${err.message}`);
       });
     },
     async healthCheck() {
