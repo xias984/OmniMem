@@ -50,10 +50,11 @@ export class InMemoryGraphRepo {
   }
 
   async findEntitiesByAlias(namespace, alias, { label = 'Entity' } = {}) {
+    const labels = Array.isArray(label) ? label : [label];
     const normalized = normalizeName(alias);
     const out = [];
     for (const [key, node] of this.nodes) {
-      if (!key.startsWith(`${namespace}::${label}::`)) continue;
+      if (!labels.some((l) => key.startsWith(`${namespace}::${l}::`))) continue;
       if (node.name_normalized === normalized || (node.aliases ?? []).map(normalizeName).includes(normalized)) {
         out.push(node);
       }
@@ -68,6 +69,16 @@ export class InMemoryGraphRepo {
       if (node.type === entityType) out.push(node);
     }
     return out;
+  }
+
+  async expandFromChunks() { return { nodes: [], edges: [] }; }
+
+  async expandFromEntities() { return { nodes: [], edges: [] }; }
+
+  async deleteNamespace(namespace) {
+    for (const key of [...this.nodes.keys()]) if (key.startsWith(`${namespace}::`)) this.nodes.delete(key);
+    for (const key of [...this.relations.keys()]) if (key.startsWith(`${namespace}::`)) this.relations.delete(key);
+    return { ok: true };
   }
 
   async findChunksByEntity(namespace, entityId) {

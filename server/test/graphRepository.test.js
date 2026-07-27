@@ -213,3 +213,84 @@ test('healthCheck delega al client', async () => {
   const result = await repo.healthCheck();
   assert.equal(result.healthy, true);
 });
+
+test('un fallimento di lettura viene propagato (non convertito silenziosamente in nessun risultato)', async () => {
+  const client = new FakeClient();
+  client.nextResult = { ok: false, error: new Error('Neo4j non raggiungibile') };
+  const repo = new GraphRepository(client);
+  await assert.rejects(() => repo.findEntity('ns', 'entity_1'), /Neo4j non raggiungibile/);
+  await assert.rejects(() => repo.findEntitiesByAlias('ns', 'unity'), /Neo4j non raggiungibile/);
+  await assert.rejects(() => repo.findEntitiesByType('ns', 'technology'), /Neo4j non raggiungibile/);
+  await assert.rejects(() => repo.findChunksByEntity('ns', 'entity_1'), /Neo4j non raggiungibile/);
+  await assert.rejects(() => repo.findActiveDecisions('ns'), /Neo4j non raggiungibile/);
+  await assert.rejects(() => repo.findSupersededDecisions('ns'), /Neo4j non raggiungibile/);
+  await assert.rejects(() => repo.findContradictions('ns'), /Neo4j non raggiungibile/);
+});
+
+test('expandFromChunks propaga il fallimento del primo hop', async () => {
+  const client = new FakeClient();
+  client.nextResult = { ok: false, error: new Error('timeout') };
+  const repo = new GraphRepository(client);
+  await assert.rejects(() => repo.expandFromChunks('ns', ['chunk_1']), /timeout/);
+});
+
+test('expandFromChunks propaga il fallimento del secondo hop', async () => {
+  const client = new FakeClient();
+  let call = 0;
+  client.run = async (cypher, params) => {
+    call += 1;
+    client.calls.push({ cypher, params });
+    if (call === 1) return { ok: true, records: [] };
+    return { ok: false, error: new Error('hop2 fallito') };
+  };
+  const repo = new GraphRepository(client);
+  await assert.rejects(() => repo.expandFromChunks('ns', ['chunk_1'], { maxHops: 2 }), /hop2 fallito/);
+});
+
+test('upsertNode salva sia gli alias originali sia la loro forma normalizzata', async () => {
+  const client = new FakeClient();
+  client.nextResult = { ok: true, records: [fakeRecord({ n: fakeNode({ id: 'entity_1', namespace: 'ns' }) })] };
+  const repo = new GraphRepository(client);
+  await repo.upsertNode('Entity', { id: 'entity_1', namespace: 'ns', name: 'Neo4j', aliases: ['Neo4J', 'Neo Four J'] });
+  assert.deepEqual(client.calls[0].params.aliasesNormalized, ['neo4j', 'neo four j']);
+  assert.deepEqual(client.calls[0].params.aliases, ['Neo4J', 'Neo Four J']);
+});
+
+test('findEntitiesByAlias cerca in aliases_normalized, non in aliases grezzi', async () => {
+  const client = new FakeClient();
+  const repo = new GraphRepository(client);
+  await repo.findEntitiesByAlias('ns', 'Neo4J');
+  assert.match(client.calls[0].cypher, /aliases_normalized/);
+  assert.doesNotMatch(client.calls[0].cypher, /\$normalized IN n\.aliases\b/);
+});
+
+test('findEntitiesByAlias con piu label cerca su tutte (non solo :Entity)', async () => {
+  const client = new FakeClient();
+  const repo = new GraphRepository(client);
+  await repo.findEntitiesByAlias('ns', 'unity', { label: ['Entity', 'Project', 'Tool'] });
+  assert.match(client.calls[0].cypher, /n:Entity OR n:Project OR n:Tool/);
+});
+
+test('expandFromEntities cerca i seed su tutte le label tipizzate, non solo :Entity', async () => {
+  const client = new FakeClient();
+  const repo = new GraphRepository(client);
+  await repo.expandFromEntities('ns', ['project_1']);
+  assert.match(client.calls[0].cypher, /seed:Entity OR seed:Project OR seed:Tool OR seed:Task OR seed:File OR seed:Session OR seed:Source/);
+});
+
+test('deleteNamespace elimina tutti i nodi del namespace a prescindere dalla label', async () => {
+  const client = new FakeClient();
+  const repo = new GraphRepository(client);
+  const result = await repo.deleteNamespace('hearthfall');
+  assert.equal(result.ok, true);
+  assert.match(client.calls[0].cypher, /DETACH DELETE n/);
+  assert.equal(client.calls[0].params.namespace, 'hearthfall');
+});
+
+test('deleteNamespace ritorna ok:false (non lancia) se la query fallisce', async () => {
+  const client = new FakeClient();
+  client.nextResult = { ok: false, error: new Error('boom') };
+  const repo = new GraphRepository(client);
+  const result = await repo.deleteNamespace('hearthfall');
+  assert.equal(result.ok, false);
+});

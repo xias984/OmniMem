@@ -154,3 +154,98 @@ test('supersedes verso una decisione mai vista crea uno stub storico invece di f
   assert.equal(stub.status, 'historical');
   assert.equal(stub.metadata.stub, true);
 });
+
+test('crea un arco Chunk-[:MENTIONS]->Entity per ogni entita dichiarata dall estrattore', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  const extraction = {
+    ok: true,
+    data: {
+      entities: [{ temporary_id: 'e1', name: 'Unity WebGL', type: 'technology', aliases: [] }],
+      relations: [],
+      decisions: [],
+    },
+  };
+  await indexMemoryIntoGraph(
+    { namespace: 'hearthfall', memory: baseMemory, chunks: baseChunks },
+    { graphRepo, extractor: fakeExtractor(extraction), thresholds, extractorVersion: 'v1' }
+  );
+
+  const entityGraphId = [...graphRepo.nodes.values()].find((n) => n.name === 'Unity WebGL').id;
+  const cid = chunkId('hearthfall', 'chunk_248');
+  const mentions = graphRepo.relations.get(`hearthfall::${cid}::MENTIONS::${entityGraphId}`);
+  assert.ok(mentions, 'deve esistere un arco MENTIONS dal chunk verso l entita dichiarata');
+
+  // L'entita deve essere recuperabile a partire dal chunk (findChunksByEntity)
+  const chunksForEntity = await graphRepo.findChunksByEntity('hearthfall', entityGraphId);
+  assert.equal(chunksForEntity.length, 1);
+  assert.equal(chunksForEntity[0].id, cid);
+});
+
+test('crea MENTIONS anche per entita risolte al volo come endpoint di una relazione', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  const extraction = {
+    ok: true,
+    data: {
+      // 'Hearthfall' non e' dichiarata come entita esplicita: viene risolta
+      // solo perche' compare come source di una relazione.
+      entities: [],
+      relations: [{ source: 'Hearthfall', relationship: 'USES', target: 'Unity WebGL', description: '', confidence: 0.9, evidence_chunk_id: 'chunk_248' }],
+      decisions: [],
+    },
+  };
+  await indexMemoryIntoGraph(
+    { namespace: 'hearthfall', memory: baseMemory, chunks: baseChunks },
+    { graphRepo, extractor: fakeExtractor(extraction), thresholds, extractorVersion: 'v1' }
+  );
+
+  const cid = chunkId('hearthfall', 'chunk_248');
+  const hearthfallNode = [...graphRepo.nodes.values()].find((n) => n.name === 'Hearthfall');
+  assert.ok(hearthfallNode, 'l entita ad-hoc deve comunque essere stata creata');
+  const mentions = graphRepo.relations.get(`hearthfall::${cid}::MENTIONS::${hearthfallNode.id}`);
+  assert.ok(mentions, 'anche un entita risolta al volo deve avere un arco MENTIONS dal suo chunk di evidenza');
+});
+
+test('un fallimento nella scrittura strutturale (Memory) abortisce prima di chiamare l estrattore', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  let extractorCalled = false;
+  const failingRepo = {
+    ...graphRepo,
+    upsertNode: async (label, props) => {
+      if (label === 'Memory') return { ok: false, error: new Error('Neo4j non raggiungibile') };
+      return graphRepo.upsertNode(label, props);
+    },
+    upsertRelation: graphRepo.upsertRelation.bind(graphRepo),
+    findEntity: graphRepo.findEntity.bind(graphRepo),
+  };
+  const extractor = { async extract() { extractorCalled = true; return { ok: true, data: { entities: [], relations: [], decisions: [] } }; } };
+
+  const result = await indexMemoryIntoGraph(
+    { namespace: 'hearthfall', memory: baseMemory, chunks: baseChunks },
+    { graphRepo: failingRepo, extractor, thresholds, extractorVersion: 'v1' }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, 'structural');
+  assert.equal(extractorCalled, false, 'non deve nemmeno tentare l estrazione se la struttura portante fallisce');
+});
+
+test('un fallimento nella scrittura di un Chunk o del suo CHUNK_OF abortisce comunque il job', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  const failingRepo = {
+    ...graphRepo,
+    upsertNode: graphRepo.upsertNode.bind(graphRepo),
+    upsertRelation: async (props) => {
+      if (props.type === 'CHUNK_OF') return { ok: false, error: new Error('scrittura CHUNK_OF fallita') };
+      return graphRepo.upsertRelation(props);
+    },
+  };
+  const extractor = fakeExtractor({ ok: true, data: { entities: [], relations: [], decisions: [] } });
+
+  const result = await indexMemoryIntoGraph(
+    { namespace: 'hearthfall', memory: baseMemory, chunks: baseChunks },
+    { graphRepo: failingRepo, extractor, thresholds, extractorVersion: 'v1' }
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, 'structural');
+});

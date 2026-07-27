@@ -31,14 +31,22 @@ export async function indexMemoryIntoGraph(input, deps) {
   }
 
   // ── 1. Struttura portante: Memory + Chunk + CHUNK_OF (sempre, indipendente dall'estrazione) ──
+  // Queste scritture sono la base su cui si appoggia tutto il resto (entita',
+  // relazioni, evidence): se una di loro fallisce (Neo4j giu', timeout...) il
+  // job deve essere considerato fallito e ritentato dalla coda, non "riuscito
+  // a meta'". upsertNode/upsertRelation non lanciano mai: vanno controllati.
   const memGraphId = memoryId(namespace, memory?.sourceUrl, memory?.captureId);
-  await graphRepo.upsertNode('Memory', {
+  const memoryResult = await graphRepo.upsertNode('Memory', {
     id: memGraphId,
     namespace,
     type: 'memory',
     name: memory?.title ?? memory?.sourceUrl ?? memGraphId,
     metadata: { source_url: memory?.sourceUrl ?? '', platform: memory?.platform ?? 'unknown', topic: memory?.topic ?? '' },
   });
+  if (!memoryResult.ok) {
+    metrics.increment('graph_failures');
+    return { ok: false, stage: 'structural', error: memoryResult.error, stats: emptyStats() };
+  }
 
   /** @type {Map<string,string>} chroma chunk id -> graph chunk id */
   const chunkGraphIds = new Map();
@@ -46,7 +54,7 @@ export async function indexMemoryIntoGraph(input, deps) {
     const cid = chunkId(namespace, chunk.id);
     chunkGraphIds.set(chunk.id, cid);
     // eslint-disable-next-line no-await-in-loop
-    await graphRepo.upsertNode('Chunk', {
+    const chunkResult = await graphRepo.upsertNode('Chunk', {
       id: cid,
       namespace,
       type: 'chunk',
@@ -54,8 +62,12 @@ export async function indexMemoryIntoGraph(input, deps) {
       summary: (chunk.text ?? '').slice(0, 280),
       metadata: { chroma_id: chunk.id, timestamp: chunk.timestamp ?? null },
     });
+    if (!chunkResult.ok) {
+      metrics.increment('graph_failures');
+      return { ok: false, stage: 'structural', error: chunkResult.error, stats: emptyStats() };
+    }
     // eslint-disable-next-line no-await-in-loop
-    await graphRepo.upsertRelation({
+    const chunkOfResult = await graphRepo.upsertRelation({
       fromLabel: 'Chunk',
       fromId: cid,
       toLabel: 'Memory',
@@ -66,6 +78,10 @@ export async function indexMemoryIntoGraph(input, deps) {
       sourceChunkIds: [cid], // il chunk e' evidenza di se stesso: relazione strutturale
       extractorVersion: 'structural',
     });
+    if (!chunkOfResult.ok) {
+      metrics.increment('graph_failures');
+      return { ok: false, stage: 'structural', error: chunkOfResult.error, stats: emptyStats() };
+    }
   }
 
   // ── 2. Estrazione strutturata (puo' fallire senza intaccare la struttura sopra) ──
@@ -136,6 +152,27 @@ export async function indexMemoryIntoGraph(input, deps) {
     }
     // exact_match: nodo gia' presente e identico, nessuna scrittura necessaria.
 
+    // Collega l'entita' a tutti i chunk di questa memory: e' l'unica evidenza
+    // disponibile per un'entita' dichiarata (lo schema dell'estrattore non
+    // porta un evidence_chunk_id per-entita', solo per relazioni/decisioni).
+    // Senza questi archi MENTIONS, findChunksByEntity e l'espansione seedata
+    // da entita' non troverebbero mai alcun chunk per un'entita' che non
+    // compare anche come source/target di una relazione.
+    for (const cid of chunkGraphIds.values()) {
+      // eslint-disable-next-line no-await-in-loop
+      await graphRepo.upsertRelation({
+        fromLabel: 'Chunk',
+        fromId: cid,
+        toLabel: label,
+        toId: targetId,
+        type: 'MENTIONS',
+        namespace,
+        confidence: 1,
+        sourceChunkIds: [cid],
+        extractorVersion,
+      });
+    }
+
     nameToRef.set(entity.name, { id: targetId, label });
     for (const alias of entity.aliases ?? []) nameToRef.set(alias, { id: targetId, label });
   }
@@ -175,6 +212,25 @@ export async function indexMemoryIntoGraph(input, deps) {
     // eslint-disable-next-line no-await-in-loop
     const toRef = await resolveNameToRef(relation.target);
     const evidenceGraphChunkId = chunkGraphIds.get(relation.evidence_chunk_id);
+
+    // Entita' risolte "al volo" (tipo 'other', non dichiarate esplicitamente
+    // dall'estrattore) non ricevono i MENTIONS per-batch dello step 3: qui
+    // colleghiamo comunque il chunk di evidenza specifico. Per le entita'
+    // gia' dichiarate e' un'unione idempotente con l'arco gia' creato sopra.
+    for (const ref of [fromRef, toRef]) {
+      // eslint-disable-next-line no-await-in-loop
+      await graphRepo.upsertRelation({
+        fromLabel: 'Chunk',
+        fromId: evidenceGraphChunkId,
+        toLabel: ref.label,
+        toId: ref.id,
+        type: 'MENTIONS',
+        namespace,
+        confidence: relation.confidence,
+        sourceChunkIds: [evidenceGraphChunkId],
+        extractorVersion,
+      });
+    }
 
     // eslint-disable-next-line no-await-in-loop
     const result = await graphRepo.upsertRelation({

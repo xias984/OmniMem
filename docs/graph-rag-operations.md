@@ -84,9 +84,16 @@ npm run graph:backfill -- --extractor-version=v2 --batch-size=100
 
 Il backfill è **idempotente** (stessi id stabili → nessun duplicato) e
 **riprendibile**: il progresso (offset per namespace) è salvato in
-`server/data/graph-backfill-checkpoint.json` dopo ogni batch. Se il processo
-viene interrotto (Ctrl+C, crash, riavvio), rilanciando lo stesso comando
-riprende dall'ultimo checkpoint invece di ripartire da zero.
+`server/data/graph-backfill-checkpoint.json` **solo quando un'intera pagina
+(batch) è stata processata con successo**. Se una singola memory in quella
+pagina fallisce (Neo4j giù, estrazione fallita...), oppure `--limit` taglia
+l'esecuzione a metà pagina, il checkpoint resta fermo all'inizio della
+pagina: alla prossima esecuzione l'intera pagina viene ripresa da capo,
+comprese le memory già indicizzate con successo (innocuo, grazie
+all'idempotenza) — cosi' nessuna memory viene mai saltata per sempre a
+causa di un errore transitorio. Se il processo viene interrotto (Ctrl+C,
+crash, riavvio) a meta' pagina, rilanciando lo stesso comando si riprende
+dall'ultimo checkpoint salvato, non da zero.
 
 Equivalente via HTTP (utile per orchestrazione esterna):
 

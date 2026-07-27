@@ -101,13 +101,25 @@ export async function runBackfill(options = {}, deps) {
       groups.get(key).chunks.push({ id: item.id, text: item.document, timestamp: ts });
     }
 
+    // Il checkpoint avanza SOLO se l'intera pagina viene completata (tutti i
+    // gruppi indicizzati con successo, o dry-run). Se un gruppo fallisce, o
+    // se il --limit viene raggiunto a meta' pagina, il checkpoint resta
+    // all'offset di INIZIO pagina: alla prossima esecuzione l'intera pagina
+    // viene ripresa da capo (idempotente e quindi sicuro anche per i gruppi
+    // gia' riusciti) invece di saltare per sempre il gruppo fallito o quelli
+    // rimasti non processati.
+    let pageFullyProcessed = true;
+
     for (const group of groups.values()) {
-      if (summary.processedChunks >= limit) break;
-      summary.processedMemories += 1;
-      summary.processedChunks += group.chunks.length;
+      if (summary.processedChunks >= limit) {
+        pageFullyProcessed = false;
+        break;
+      }
 
       if (dryRun) {
         logger.log?.(`[graph-backfill] (dry-run) indicizzerebbe memory namespace=${group.namespace} chunk=${group.chunks.length}`);
+        summary.processedMemories += 1;
+        summary.processedChunks += group.chunks.length;
         // eslint-disable-next-line no-continue
         continue;
       }
@@ -115,20 +127,40 @@ export async function runBackfill(options = {}, deps) {
       try {
         // eslint-disable-next-line no-await-in-loop
         const result = await indexMemoryIntoGraph(group, { graphRepo, extractor, embed, thresholds, extractorVersion });
-        if (!result.ok) summary.errors += 1;
+        if (!result.ok) {
+          summary.errors += 1;
+          pageFullyProcessed = false;
+          logger.error?.(
+            `[graph-backfill] gruppo namespace=${group.namespace} fallito: ${result.error?.message ?? result.stage}. ` +
+            'Il checkpoint non avanzera oltre questa pagina: verra ritentato alla prossima esecuzione.'
+          );
+          break;
+        }
+        summary.processedMemories += 1;
+        summary.processedChunks += group.chunks.length;
         logger.log?.(
-          `[graph-backfill] namespace=${group.namespace} chunk=${group.chunks.length} ok=${result.ok} progresso totale=${summary.processedChunks}`
+          `[graph-backfill] namespace=${group.namespace} chunk=${group.chunks.length} ok=true progresso totale=${summary.processedChunks}`
         );
       } catch (err) {
         summary.errors += 1;
-        logger.error?.(`[graph-backfill] errore su memory namespace=${group.namespace}: ${err.message}`);
+        pageFullyProcessed = false;
+        logger.error?.(
+          `[graph-backfill] errore su memory namespace=${group.namespace}: ${err.message}. ` +
+          'Il checkpoint non avanzera oltre questa pagina: verra ritentato alla prossima esecuzione.'
+        );
+        break;
       }
     }
 
-    offset += page.items.length;
-    if (!dryRun) {
-      // eslint-disable-next-line no-await-in-loop
-      await saveCheckpoint(checkpointPath, { ...checkpoints, [checkpointKey]: { offset, updatedAt: new Date().toISOString() } });
+    if (pageFullyProcessed) {
+      offset += page.items.length;
+      if (!dryRun) {
+        // eslint-disable-next-line no-await-in-loop
+        await saveCheckpoint(checkpointPath, { ...checkpoints, [checkpointKey]: { offset, updatedAt: new Date().toISOString() } });
+      }
+    } else {
+      logger.log?.(`[graph-backfill] pagina non completata: il checkpoint resta a offset=${offset} per essere ripreso.`);
+      break;
     }
     if (!page.hasMore) break;
   }

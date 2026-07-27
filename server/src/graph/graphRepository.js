@@ -8,13 +8,38 @@
  */
 import { isValidLabel, isValidRelationType, bootstrapStatements } from './schema.js';
 import { normalizeName } from '../ids.js';
+import { QUERY_RESOLVABLE_LABELS } from './entityTypeMapping.js';
 
 function assertLabel(label) {
   if (!isValidLabel(label)) throw new Error(`Label grafo non valida: ${label}`);
 }
 
+function assertLabels(labels) {
+  for (const label of labels) assertLabel(label);
+}
+
 function assertRelationType(type) {
   if (!isValidRelationType(type)) throw new Error(`Tipo di relazione non valido: ${type}`);
+}
+
+/**
+ * Le letture non devono MAI confondere "nessun risultato" con "la query e'
+ * fallita" (Neo4j giu', timeout...): un errore silenziosamente convertito in
+ * `[]` avrebbe fatto proseguire il retrieval ibrido come se il grafo fosse
+ * vuoto, invece di attivare il fallback al solo vettoriale. Qui si lancia
+ * sempre, cosi' chi chiama (hybridRetriever, dualWrite via entityResolver)
+ * puo' intercettare e reagire esplicitamente.
+ */
+function unwrapOrThrow(result, context) {
+  if (!result.ok) {
+    throw new Error(`Query Neo4j fallita (${context}): ${result.error?.message ?? 'errore sconosciuto'}`);
+  }
+  return result.records;
+}
+
+/** Clausola "n:Label1 OR n:Label2 ..." per una lista di label candidate (gia' validate). */
+function anyLabelClause(variable, labels) {
+  return labels.map((l) => `${variable}:${l}`).join(' OR ');
 }
 
 function toRecordObject(record, key) {
@@ -74,11 +99,16 @@ export class GraphRepository {
     if (rest.name) flatProps.name_normalized = normalizeName(rest.name);
     const metadataJson = JSON.stringify(metadata ?? {});
     const aliasList = Array.isArray(aliases) ? aliases : [];
+    // Gli alias si confrontano sempre in forma normalizzata (findEntitiesByAlias
+    // cerca in aliases_normalized): un alias salvato con casing/punteggiatura
+    // originali ("Neo4J") non troverebbe mai match con una query normalizzata
+    // ("neo4j") se confrontato cosi' com'e'.
+    const aliasesNormalized = aliasList.map((a) => normalizeName(a));
 
     const cypher = `
       MERGE (n:${label} {namespace: $namespace, id: $id})
-      ON CREATE SET n += $flatProps, n.aliases = $aliases, n.metadata = $metadataJson, n.created_at = $now, n.updated_at = $now
-      ON MATCH SET n += $flatProps, n.aliases = $aliases, n.metadata = $metadataJson, n.updated_at = $now
+      ON CREATE SET n += $flatProps, n.aliases = $aliases, n.aliases_normalized = $aliasesNormalized, n.metadata = $metadataJson, n.created_at = $now, n.updated_at = $now
+      ON MATCH SET n += $flatProps, n.aliases = $aliases, n.aliases_normalized = $aliasesNormalized, n.metadata = $metadataJson, n.updated_at = $now
       RETURN n
     `;
     const result = await this.client.run(cypher, {
@@ -86,6 +116,7 @@ export class GraphRepository {
       id,
       flatProps,
       aliases: aliasList,
+      aliasesNormalized,
       metadataJson,
       now: new Date().toISOString(),
     });
@@ -152,8 +183,9 @@ export class GraphRepository {
       RETURN r LIMIT 1
     `;
     const result = await this.client.run(cypher, { namespace, fromId, toId }, { mode: 'READ' });
-    if (!result.ok || result.records.length === 0) return null;
-    return parseMetadata(toRecordObject(result.records[0], 'r'));
+    const records = unwrapOrThrow(result, 'findRelation');
+    if (records.length === 0) return null;
+    return parseMetadata(toRecordObject(records[0], 'r'));
   }
 
   /** Ricerca esatta per chiave canonica (namespace + type + id gia' calcolato altrove). */
@@ -161,17 +193,26 @@ export class GraphRepository {
     assertLabel(label);
     const cypher = `MATCH (n:${label} {namespace: $namespace, id: $id}) RETURN n LIMIT 1`;
     const result = await this.client.run(cypher, { namespace, id }, { mode: 'READ' });
-    if (!result.ok || result.records.length === 0) return null;
-    return parseMetadata(toRecordObject(result.records[0], 'n'));
+    const records = unwrapOrThrow(result, 'findEntity');
+    if (records.length === 0) return null;
+    return parseMetadata(toRecordObject(records[0], 'n'));
   }
 
-  /** Ricerca per alias o nome normalizzato (case/punteggiatura-insensitive). */
+  /**
+   * Ricerca per alias o nome normalizzato (case/punteggiatura-insensitive).
+   * `label` accetta una singola label (uso tipico in fase di indicizzazione,
+   * dove il tipo concreto e' gia' noto) oppure un array di label candidate
+   * (uso tipico in fase di query, dove un'entita' citata nel testo puo'
+   * essere un Project, un Tool, un Task... non solo un Entity generico).
+   */
   async findEntitiesByAlias(namespace, alias, { label = 'Entity', limit = 50 } = {}) {
-    assertLabel(label);
+    const labels = Array.isArray(label) ? label : [label];
+    assertLabels(labels);
     const normalized = normalizeName(alias);
     const cypher = `
-      MATCH (n:${label} {namespace: $namespace})
-      WHERE n.name_normalized = $normalized OR $normalized IN n.aliases
+      MATCH (n {namespace: $namespace})
+      WHERE (${anyLabelClause('n', labels)})
+        AND (n.name_normalized = $normalized OR $normalized IN n.aliases_normalized)
       RETURN n LIMIT $limit
     `;
     const result = await this.client.run(
@@ -179,8 +220,8 @@ export class GraphRepository {
       { namespace, normalized, limit: neo4jInt(limit) },
       { mode: 'READ' }
     );
-    if (!result.ok) return [];
-    return result.records.map((r) => parseMetadata(toRecordObject(r, 'n')));
+    const records = unwrapOrThrow(result, 'findEntitiesByAlias');
+    return records.map((r) => parseMetadata(toRecordObject(r, 'n')));
   }
 
   /** Tutte le entita' dello stesso tipo in un namespace (per fuzzy matching). */
@@ -195,13 +236,13 @@ export class GraphRepository {
       { namespace, entityType, limit: neo4jInt(limit) },
       { mode: 'READ' }
     );
-    if (!result.ok) return [];
-    return result.records.map((r) => parseMetadata(toRecordObject(r, 'n')));
+    const records = unwrapOrThrow(result, 'findEntitiesByType');
+    return records.map((r) => parseMetadata(toRecordObject(r, 'n')));
   }
 
   async findChunksByEntity(namespace, entityId, { limit = 50 } = {}) {
     const cypher = `
-      MATCH (c:Chunk {namespace: $namespace})-[:MENTIONS]->(e:Entity {namespace: $namespace, id: $entityId})
+      MATCH (c:Chunk {namespace: $namespace})-[:MENTIONS]->(e {namespace: $namespace, id: $entityId})
       RETURN DISTINCT c LIMIT $limit
     `;
     const result = await this.client.run(
@@ -209,8 +250,22 @@ export class GraphRepository {
       { namespace, entityId, limit: neo4jInt(limit) },
       { mode: 'READ' }
     );
-    if (!result.ok) return [];
-    return result.records.map((r) => parseMetadata(toRecordObject(r, 'c')));
+    const records = unwrapOrThrow(result, 'findChunksByEntity');
+    return records.map((r) => parseMetadata(toRecordObject(r, 'c')));
+  }
+
+  /**
+   * Elimina tutti i nodi (e le relazioni collegate) di un namespace, a
+   * prescindere dalla label. Usato quando un topic viene cancellato da
+   * ChromaDB (`DELETE /api/topics/:topic`): senza questo, il grafo
+   * continuerebbe a esporre entita'/decisioni di un topic che l'utente ha
+   * esplicitamente rimosso.
+   */
+  async deleteNamespace(namespace) {
+    const cypher = `MATCH (n {namespace: $namespace}) DETACH DELETE n`;
+    const result = await this.client.run(cypher, { namespace }, { mode: 'WRITE' });
+    if (!result.ok) return { ok: false, error: result.error };
+    return { ok: true };
   }
 
   /**
@@ -225,41 +280,50 @@ export class GraphRepository {
     return this.expandFromSeeds('Chunk', namespace, chunkIds, options);
   }
 
+  /**
+   * Le entita' seed possono avere label diverse da `Entity` (Project, Tool,
+   * Task, File, Session, Source sono tutte label concrete usate in fase di
+   * indicizzazione): un vincolo `:Entity` fisso qui perderebbe silenziosamente
+   * qualsiasi seed tipizzato.
+   */
   async expandFromEntities(namespace, entityIds, options = {}) {
-    return this.expandFromSeeds('Entity', namespace, entityIds, options);
+    return this.expandFromSeeds(QUERY_RESOLVABLE_LABELS, namespace, entityIds, options);
   }
 
+  /** @param {string|string[]} seedLabel una label singola o un elenco di label candidate */
   async expandFromSeeds(seedLabel, namespace, seedIds, { maxHops = 2, maxNodes = 100, maxEdges = 300 } = {}) {
-    assertLabel(seedLabel);
+    const seedLabels = Array.isArray(seedLabel) ? seedLabel : [seedLabel];
+    assertLabels(seedLabels);
     if (!seedIds || seedIds.length === 0) return { nodes: [], edges: [] };
     const hops = Math.max(1, Math.min(maxHops, 2));
+    const seedClause = anyLabelClause('seed', seedLabels);
 
     const hop1Cypher = `
-      MATCH (seed:${seedLabel} {namespace: $namespace})
-      WHERE seed.id IN $seedIds
+      MATCH (seed {namespace: $namespace})
+      WHERE (${seedClause}) AND seed.id IN $seedIds
       MATCH (seed)-[r1]-(n1 {namespace: $namespace})
       RETURN DISTINCT n1 AS node, r1 AS rel, startNode(r1).id AS relFrom, endNode(r1).id AS relTo, 1 AS hop
       LIMIT $maxEdges
     `;
     const hop1 = await this.client.run(hop1Cypher, { namespace, seedIds, maxEdges: neo4jInt(maxEdges) }, { mode: 'READ' });
-    if (!hop1.ok) return { nodes: [], edges: [] };
+    const hop1Records = unwrapOrThrow(hop1, 'expandFromSeeds:hop1');
 
-    let hop2 = { ok: true, records: [] };
+    let hop2Records = [];
     if (hops >= 2) {
       const hop2Cypher = `
-        MATCH (seed:${seedLabel} {namespace: $namespace})
-        WHERE seed.id IN $seedIds
+        MATCH (seed {namespace: $namespace})
+        WHERE (${seedClause}) AND seed.id IN $seedIds
         MATCH (seed)-[]-(n1 {namespace: $namespace})
         MATCH (n1)-[r2]-(n2 {namespace: $namespace})
         WHERE NOT n2.id IN $seedIds
         RETURN DISTINCT n2 AS node, r2 AS rel, startNode(r2).id AS relFrom, endNode(r2).id AS relTo, 2 AS hop
         LIMIT $maxEdges
       `;
-      hop2 = await this.client.run(hop2Cypher, { namespace, seedIds, maxEdges: neo4jInt(maxEdges) }, { mode: 'READ' });
-      if (!hop2.ok) hop2 = { ok: true, records: [] };
+      const hop2 = await this.client.run(hop2Cypher, { namespace, seedIds, maxEdges: neo4jInt(maxEdges) }, { mode: 'READ' });
+      hop2Records = unwrapOrThrow(hop2, 'expandFromSeeds:hop2');
     }
 
-    return collectExpansion([...hop1.records, ...hop2.records], maxNodes);
+    return collectExpansion([...hop1Records, ...hop2Records], maxNodes);
   }
 
   async findActiveDecisions(namespace, { limit = 50 } = {}) {
@@ -268,8 +332,8 @@ export class GraphRepository {
       RETURN d ORDER BY d.updated_at DESC LIMIT $limit
     `;
     const result = await this.client.run(cypher, { namespace, limit: neo4jInt(limit) }, { mode: 'READ' });
-    if (!result.ok) return [];
-    return result.records.map((r) => parseMetadata(toRecordObject(r, 'd')));
+    const records = unwrapOrThrow(result, 'findActiveDecisions');
+    return records.map((r) => parseMetadata(toRecordObject(r, 'd')));
   }
 
   async findSupersededDecisions(namespace, { limit = 50 } = {}) {
@@ -279,8 +343,8 @@ export class GraphRepository {
       RETURN d, collect(newer) AS supersededBy ORDER BY d.updated_at DESC LIMIT $limit
     `;
     const result = await this.client.run(cypher, { namespace, limit: neo4jInt(limit) }, { mode: 'READ' });
-    if (!result.ok) return [];
-    return result.records.map((r) => ({
+    const records = unwrapOrThrow(result, 'findSupersededDecisions');
+    return records.map((r) => ({
       ...parseMetadata(toRecordObject(r, 'd')),
       supersededBy: (r.get('supersededBy') ?? []).map((n) => parseMetadata({ ...n.properties })),
     }));
@@ -292,8 +356,8 @@ export class GraphRepository {
       RETURN a, r, b LIMIT $limit
     `;
     const result = await this.client.run(cypher, { namespace, limit: neo4jInt(limit) }, { mode: 'READ' });
-    if (!result.ok) return [];
-    return result.records.map((r) => ({
+    const records = unwrapOrThrow(result, 'findContradictions');
+    return records.map((r) => ({
       a: parseMetadata(toRecordObject(r, 'a')),
       relation: parseMetadata(toRecordObject(r, 'r')),
       b: parseMetadata(toRecordObject(r, 'b')),

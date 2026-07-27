@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { extractCandidatePhrases, graphRetrieve } from '../src/retrieval/graphRetriever.js';
 import { chunkId } from '../src/ids.js';
+import { QUERY_RESOLVABLE_LABELS } from '../src/graph/entityTypeMapping.js';
 
 test('extractCandidatePhrases genera n-gram rilevanti scartando le stopword', () => {
   const phrases = extractCandidatePhrases('Quale tecnologia usa Hearthfall per il rendering?');
@@ -86,4 +87,34 @@ test('graphRetrieve isola le contraddizioni tra gli archi restituiti', async () 
   const result = await graphRetrieve({ queryText: 'x', namespace: 'ns', seedChunks: [{ id: 'chunk_1' }] }, { graphRepo, maxHops: 2 });
   assert.equal(result.contradictions.length, 1);
   assert.equal(result.contradictions[0].type, 'CONTRADICTS');
+});
+
+test('la risoluzione delle entita nella query cerca su tutte le label tipizzate, non solo :Entity', async () => {
+  const seenLabels = [];
+  const graphRepo = {
+    async findEntitiesByAlias(namespace, phrase, opts) { seenLabels.push(opts?.label); return []; },
+    async expandFromChunks() { return { nodes: [], edges: [] }; },
+    async expandFromEntities() { return { nodes: [], edges: [] }; },
+  };
+  await graphRetrieve({ queryText: 'Unity', namespace: 'ns', seedChunks: [] }, { graphRepo, maxHops: 2 });
+  assert.ok(seenLabels.length > 0);
+  for (const label of seenLabels) assert.deepEqual(label, QUERY_RESOLVABLE_LABELS);
+});
+
+test('entityNodes include anche le label tipizzate (Task/File/Session/Source), non solo Entity/Project/Tool', async () => {
+  const graphRepo = {
+    async findEntitiesByAlias() { return []; },
+    async expandFromChunks() {
+      return {
+        nodes: [
+          { id: 'task_1', name: 'Task A', __labels: ['Task'], hop: 1, metadata: {} },
+          { id: 'file_1', name: 'File A', __labels: ['File'], hop: 1, metadata: {} },
+        ],
+        edges: [],
+      };
+    },
+    async expandFromEntities() { return { nodes: [], edges: [] }; },
+  };
+  const result = await graphRetrieve({ queryText: 'x', namespace: 'ns', seedChunks: [{ id: 'chunk_1' }] }, { graphRepo, maxHops: 2 });
+  assert.equal(result.entityNodes.length, 2);
 });

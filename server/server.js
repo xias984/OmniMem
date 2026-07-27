@@ -59,12 +59,19 @@ async function runGraphBackfill({ namespace = null, dryRun = false, limit } = {}
 }
 
 /** Esegue il retrieval ibrido + context builder per una query. Usato da /api/query in hybrid/shadow mode. */
-async function runHybridForQuery(queryText, namespace, k) {
+/**
+ * `seedChunks`, se passati, sono il risultato vettoriale gia' calcolato da
+ * `/api/query` (stessa soglia/raggruppamento canonici): evita una seconda
+ * chiamata embed()+collection.query() identica dentro hybridRetrieve. La
+ * `collection` resta comunque necessaria per recuperare il testo completo
+ * dei chunk trovati solo tramite espansione grafo.
+ */
+async function runHybridForQuery(queryText, namespace, k, seedChunks) {
   const collection = await getCollection();
   const retrieval = await hybridRetrieve(
-    { queryText, namespace: namespace ?? 'Generale', k },
+    { queryText, namespace: namespace ?? 'Generale', k, seedChunks },
     {
-      vector: { embed, collection, distanceThreshold: 0.75 },
+      vector: { embed, collection },
       graphRepo: graphRuntime.graphRepo,
       graphEnabled: graphRuntime.enabled || graphRuntime.shadowMode,
       graphRetrieval: graphConfig.graphRetrieval,
@@ -313,6 +320,7 @@ async function processIngestCodebase(body, jobId) {
 
     const files = walkDir(rootPath, extSet);
     if (files.length === 0) {
+      console.warn(`[ingest-codebase] job ${jobId}: 0 file trovati in "${rootPath}" (extSet=${[...extSet].join(',')})`);
       job.status = 'done';
       job.chunks_saved = 0;
       return;
@@ -361,6 +369,25 @@ async function processIngestCodebase(body, jobId) {
 
       await collection.upsert({ ids, embeddings, documents: chunks, metadatas });
       savedChunks += chunks.length;
+
+      // ── Dual write GraphRAG (best-effort, mai bloccante) ────────────────
+      // Stesso hook di processRecord: senza, con OMNIMEM_GRAPH_INDEXING_ENABLED=true
+      // un progetto ingerito da codebase resterebbe assente dal grafo finche'
+      // non si esegue manualmente un backfill.
+      try {
+        graphRuntime.enqueueIndexing({
+          namespace: topic ?? 'Generale',
+          memory: {
+            sourceUrl: `file://${filePath}`,
+            captureId: null,
+            platform: 'codebase',
+            topic: topic ?? 'Generale',
+          },
+          chunks: chunks.map((text, i) => ({ id: ids[i], text, timestamp: metadatas[i].timestamp })),
+        });
+      } catch (graphErr) {
+        console.error(`[ingest-codebase] enqueue indicizzazione grafo fallito (ignorato):`, graphErr.message);
+      }
     }
 
     job.status = 'done';
@@ -430,7 +457,7 @@ app.get('/api/progress/:jobId', (req, res) => {
 
 app.post('/api/query', async (req, res) => {
   try {
-    const { query, topic, k = 4 } = req.body;
+    const { query, topic, k = 12 } = req.body;
 
     if (!query) return res.status(400).json({ error: 'query mancante' });
 
@@ -450,21 +477,57 @@ app.post('/api/query', async (req, res) => {
     const chunks = results.documents?.[0] ?? [];
     const distances = results.distances?.[0] ?? [];
     const metas = results.metadatas?.[0] ?? [];
+    const chunkIds = results.ids?.[0] ?? [];
 
-    // Filtra risultati con similarità coseno < 0.75 (distanza > 0.25)
-    const filtered = chunks
-      .map((doc, i) => ({ doc, dist: distances[i], meta: metas[i] }))
-      .filter(({ dist }) => dist <= 0.75)
-      .map(({ doc, meta }) => `[${meta?.platform ?? '?'} — ${meta?.topic ?? '?'}]\n${doc}`);
+    // Soglia permissiva (0.85) per recuperare anche match parziali.
+    // I chunk vengono raggruppati per source_url (così conversazioni intere
+    // non vengono mescolate), e all'interno del gruppo ordinati cronologicamente.
+    const surviving = chunks
+      .map((doc, i) => ({ doc, dist: distances[i], meta: metas[i], id: chunkIds[i] }))
+      .filter(({ dist }) => dist <= 0.85);
+
+    const groups = new Map();
+    for (const item of surviving) {
+      const key = item.meta?.source_url ?? 'unknown';
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    }
+
+    // Ordina i chunk dentro ogni gruppo per timestamp; i gruppi tra loro
+    // per somiglianza media (gruppo migliore prima).
+    const groupArrays = [...groups.values()].map((items) => {
+      items.sort((a, b) => (a.meta?.timestamp ?? 0) - (b.meta?.timestamp ?? 0));
+      const avgDist = items.reduce((s, it) => s + it.dist, 0) / items.length;
+      return { items, avgDist };
+    });
+    groupArrays.sort((a, b) => a.avgDist - b.avgDist);
+
+    const filtered = [];
+    for (const { items } of groupArrays) {
+      for (const { doc, meta } of items) {
+        const platform = meta?.platform ?? '?';
+        const date = meta?.timestamp ? new Date(meta.timestamp).toISOString().slice(0, 10) : '?';
+        const src = meta?.file_path ?? meta?.source_url ?? '';
+        const srcLabel = src ? ` — ${src}` : '';
+        filtered.push(`[${platform} — ${date}${srcLabel}]\n${doc}`);
+      }
+    }
 
     // ── GraphRAG (additivo, dietro feature flag) ──────────────────────────
     // Comportamento di default (GraphRAG disattivato): responseBody resta
     // identico a `{ ok: true, chunks: filtered }`, byte per byte come oggi.
     let responseBody = { ok: true, chunks: filtered };
 
+    // Riusa la query vettoriale gia' eseguita sopra invece di richiamare
+    // embed()+collection.query() una seconda volta dentro il retriever
+    // ibrido: stesso risultato canonico, meta' della latenza Ollama/Chroma.
+    const seedChunks = surviving.map(({ id, doc, dist, meta }) => ({
+      id, text: doc, metadata: meta, distance: dist, similarity: 1 - dist,
+    }));
+
     if (graphRuntime.enabled) {
       try {
-        const { retrieval, context } = await runHybridForQuery(query, topic, k);
+        const { retrieval, context } = await runHybridForQuery(query, topic, k, seedChunks);
         responseBody = {
           ok: true,
           chunks: retrieval.results.map((r) => `[${r.metadata?.platform ?? '?'} — ${topic ?? '?'}]\n${r.text}`),
@@ -484,7 +547,7 @@ app.post('/api/query', async (req, res) => {
       // Shadow mode: esegue anche l'ibrido per confronto, ma la risposta
       // all'utente resta quella vettoriale esistente.
       try {
-        const { retrieval } = await runHybridForQuery(query, topic, k);
+        const { retrieval } = await runHybridForQuery(query, topic, k, seedChunks);
         console.log(
           `[shadow-mode] categoria=${retrieval.category} strategia=${retrieval.strategy} ` +
           `vector_chunks=${filtered.length} hybrid_chunks=${retrieval.results.length} used_graph=${retrieval.usedGraph} ` +
@@ -539,6 +602,22 @@ app.delete('/api/topics/:topic', async (req, res) => {
 
     await collection.delete({ ids });
     console.log(`[delete-topic] Eliminati ${ids.length} chunk per topic "${topic}"`);
+
+    // ── Cleanup GraphRAG (best-effort, mai bloccante) ──────────────────────
+    // Senza questo, un topic cancellato da ChromaDB lascerebbe entita',
+    // decisioni e relazioni ancora interrogabili nel grafo: l'utente
+    // vedrebbe risposte costruite su dati che ha esplicitamente rimosso.
+    if (graphRuntime.indexingEnabled && graphRuntime.graphRepo) {
+      try {
+        const graphDeleteResult = await graphRuntime.graphRepo.deleteNamespace(topic);
+        if (!graphDeleteResult.ok) {
+          console.error(`[delete-topic] pulizia Neo4j fallita per "${topic}" (ignorata):`, graphDeleteResult.error?.message);
+        }
+      } catch (graphErr) {
+        console.error(`[delete-topic] pulizia Neo4j fallita per "${topic}" (ignorata):`, graphErr.message);
+      }
+    }
+
     res.json({ ok: true, deleted: ids.length });
   } catch (err) {
     console.error('[delete-topic]', err);

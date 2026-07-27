@@ -10,6 +10,7 @@
  * tipicamente piccolo). E' un compromesso prudente documentato nel piano.
  */
 import { chunkId } from '../ids.js';
+import { QUERY_RESOLVABLE_LABELS } from '../graph/entityTypeMapping.js';
 
 const STOPWORDS = new Set([
   'il', 'lo', 'la', 'i', 'gli', 'le', 'un', 'uno', 'una', 'di', 'a', 'da', 'in', 'con', 'su', 'per', 'tra', 'fra',
@@ -42,8 +43,11 @@ async function resolveQueryEntities(namespace, query, graphRepo, maxCandidates) 
   const candidates = extractCandidatePhrases(query, { maxCandidates });
   const matched = new Map();
   for (const phrase of candidates) {
+    // Cerca su tutte le label "nameable" (Entity, Project, Tool, Task, File,
+    // Session, Source): un'entita' citata nella query puo' essere stata
+    // indicizzata sotto una qualsiasi di queste, non solo :Entity.
     // eslint-disable-next-line no-await-in-loop
-    const found = await graphRepo.findEntitiesByAlias(namespace, phrase, { limit: 5 });
+    const found = await graphRepo.findEntitiesByAlias(namespace, phrase, { label: QUERY_RESOLVABLE_LABELS, limit: 5 });
     for (const entity of found) matched.set(entity.id, entity);
   }
   return [...matched.values()];
@@ -82,7 +86,7 @@ export async function graphRetrieve({ queryText, namespace, seedChunks }, config
 
   const evidenceChunkNodes = [...nodesById.values()].filter((n) => n.__labels?.includes('Chunk'));
   const decisionNodes = [...nodesById.values()].filter((n) => n.__labels?.includes('Decision'));
-  const entityNodes = [...nodesById.values()].filter((n) => n.__labels?.includes('Entity') || n.__labels?.includes('Project') || n.__labels?.includes('Tool'));
+  const entityNodes = [...nodesById.values()].filter((n) => QUERY_RESOLVABLE_LABELS.some((l) => n.__labels?.includes(l)));
   const contradictions = [...edgesByKey.values()].filter((e) => e.type === 'CONTRADICTS');
 
   return {

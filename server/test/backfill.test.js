@@ -146,3 +146,60 @@ test('rieseguire il backfill sugli stessi dati e idempotente', async () => {
   await run();
   assert.equal(graphRepo.nodes.size, nodeCountAfterFirst);
 });
+
+test('un gruppo fallito nella pagina non fa avanzare il checkpoint (nessuno skip permanente)', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  // Due gruppi (source diverse) nella stessa pagina: il primo riesce, il secondo fallisce.
+  const items = [
+    { id: 'a1', document: 'ok', metadata: { topic: 'Hearthfall', source_url: 'https://good', timestamp: 1 } },
+    { id: 'b1', document: 'boom', metadata: { topic: 'Hearthfall', source_url: 'https://bad', timestamp: 2 } },
+  ];
+  const extractor = {
+    async extract(chunks) {
+      if (chunks.some((c) => c.text === 'boom')) return { ok: false, error: new Error('estrazione fallita apposta') };
+      return { ok: true, data: { entities: [], relations: [], decisions: [] } };
+    },
+  };
+  let savedCheckpoint = {};
+  const cp = { load: async () => savedCheckpoint, save: async (_p, data) => { savedCheckpoint = data; } };
+  const offsetsRequested = [];
+  const fetcher = async ({ offset, limit }) => {
+    offsetsRequested.push(offset);
+    return { items: items.slice(offset, offset + limit), hasMore: false };
+  };
+
+  const summary = await runBackfill(
+    { namespace: 'Hearthfall', batchSize: 10 },
+    { fetchChunksPage: fetcher, graphRepo, extractor, thresholds, loadCheckpoint: cp.load, saveCheckpoint: cp.save, checkpointPath: 'x', logger: silentLogger() }
+  );
+
+  assert.equal(summary.errors, 1);
+  assert.equal(savedCheckpoint.Hearthfall, undefined, 'il checkpoint non deve avanzare se un gruppo della pagina e fallito');
+
+  // Una seconda esecuzione riparte dall'inizio della pagina (offset 0),
+  // ritentando anche il gruppo gia' riuscito (idempotente, quindi innocuo).
+  await runBackfill(
+    { namespace: 'Hearthfall', batchSize: 10 },
+    { fetchChunksPage: fetcher, graphRepo, extractor, thresholds, loadCheckpoint: cp.load, saveCheckpoint: cp.save, checkpointPath: 'x', logger: silentLogger() }
+  );
+  assert.deepEqual(offsetsRequested, [0, 0]);
+});
+
+test('il limite che taglia a meta pagina non fa avanzare il checkpoint oltre l inizio pagina', async () => {
+  const graphRepo = new InMemoryGraphRepo();
+  const items = [
+    { id: 'a1', document: 'primo', metadata: { topic: 'Hearthfall', source_url: 'https://a', timestamp: 1 } },
+    { id: 'b1', document: 'secondo', metadata: { topic: 'Hearthfall', source_url: 'https://b', timestamp: 2 } },
+  ];
+  let savedCheckpoint = {};
+  const cp = { load: async () => savedCheckpoint, save: async (_p, data) => { savedCheckpoint = data; } };
+  const fetcher = async ({ offset, limit }) => ({ items: items.slice(offset, offset + limit), hasMore: false });
+
+  const summary = await runBackfill(
+    { namespace: 'Hearthfall', batchSize: 10, limit: 1 }, // basta per il primo gruppo, non per il secondo
+    { fetchChunksPage: fetcher, graphRepo, extractor: emptyExtractor, thresholds, loadCheckpoint: cp.load, saveCheckpoint: cp.save, checkpointPath: 'x', logger: silentLogger() }
+  );
+
+  assert.equal(summary.processedChunks, 1);
+  assert.equal(savedCheckpoint.Hearthfall, undefined, 'il checkpoint non deve avanzare se il limite ha interrotto la pagina a meta');
+});

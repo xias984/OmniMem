@@ -15,17 +15,20 @@ function noopMetrics() {
 }
 
 /**
- * @param {{queryText:string, namespace:string, k?:number}} params
- * @param {{vector:{embed:Function, collection:object, distanceThreshold?:number}, graphRepo?:object, graphEnabled:boolean,
+ * @param {{queryText:string, namespace:string, k?:number, seedChunks?:object[]}} params
+ *        `seedChunks`, se gia' disponibili (es. `/api/query` ha gia' fatto
+ *        embed+query per la risposta vettoriale), evita una seconda
+ *        chiamata embed/Chroma identica: il chiamante passa direttamente i
+ *        risultati vettoriali gia' calcolati.
+ * @param {{vector:{embed?:Function, collection:object, distanceThreshold?:number}, graphRepo?:object, graphEnabled:boolean,
  *          graphRetrieval:object, scoring:object, metrics?:object, logger?:object}} deps
  */
-export async function hybridRetrieve({ queryText, namespace, k = 6 }, deps) {
+export async function hybridRetrieve({ queryText, namespace, k = 6, seedChunks: precomputedSeedChunks }, deps) {
   const { vector, graphRepo, graphEnabled, graphRetrieval, scoring, metrics = noopMetrics(), logger = console } = deps;
   const { category, strategy } = classifyQuery(queryText);
 
-  const seedChunks = await metrics.time('vector_retrieval_duration', () =>
-    vectorRetrieve({ queryText, namespace, k }, vector)
-  );
+  const seedChunks = precomputedSeedChunks
+    ?? (await metrics.time('vector_retrieval_duration', () => vectorRetrieve({ queryText, namespace, k }, vector)));
 
   const base = {
     category,
@@ -63,7 +66,7 @@ export async function hybridRetrieve({ queryText, namespace, k = 6 }, deps) {
   metrics.increment('graph_expansion_edges', graphResult.edges.length);
 
   const results = await metrics.time('hybrid_retrieval_duration', () =>
-    mergeAndScore({ seedChunks, graphResult, namespace, scoring })
+    mergeAndScore({ seedChunks, graphResult, namespace, scoring, collection: vector?.collection, logger })
   );
   metrics.increment('retrieved_chunks', results.length);
 
@@ -95,7 +98,7 @@ function scoreVectorOnly(seedChunks, scoring) {
     .sort((a, b) => b.score - a.score);
 }
 
-function mergeAndScore({ seedChunks, graphResult, namespace, scoring }) {
+async function mergeAndScore({ seedChunks, graphResult, namespace, scoring, collection, logger }) {
   const byChromaId = new Map();
 
   for (const chunk of seedChunks) {
@@ -130,6 +133,9 @@ function mergeAndScore({ seedChunks, graphResult, namespace, scoring }) {
     } else {
       byChromaId.set(chromaId, {
         id: chromaId,
+        // Placeholder: il nodo Chunk conserva solo i primi 280 caratteri
+        // (`summary`). Il testo completo viene recuperato subito sotto da
+        // ChromaDB tramite `chroma_id`, prima che il risultato sia finale.
         text: node.summary ?? '',
         metadata: { timestamp: node.metadata?.timestamp },
         similarity: 0,
@@ -137,6 +143,26 @@ function mergeAndScore({ seedChunks, graphResult, namespace, scoring }) {
         relationConfidence,
         sources: new Set(['graph']),
       });
+    }
+  }
+
+  // I chunk scoperti SOLO tramite espansione grafo hanno per ora solo il
+  // riepilogo troncato del nodo Chunk: recuperiamo il documento completo da
+  // ChromaDB (fino a 800 caratteri) in un'unica chiamata batched, cosi' il
+  // contesto finale non presenta mai testo troncato per i chunk graph-only.
+  const graphOnlyIds = [...byChromaId.values()]
+    .filter((c) => c.sources.has('graph') && !c.sources.has('vector'))
+    .map((c) => c.id);
+  if (graphOnlyIds.length > 0 && collection) {
+    try {
+      const full = await collection.get({ ids: graphOnlyIds, include: ['documents'] });
+      const fullIds = full.ids ?? [];
+      const fullDocs = full.documents ?? [];
+      fullIds.forEach((id, i) => {
+        if (fullDocs[i] && byChromaId.has(id)) byChromaId.get(id).text = fullDocs[i];
+      });
+    } catch (err) {
+      logger?.error?.(`[hybrid-retriever] impossibile recuperare il testo completo dei chunk graph-only: ${err.message}`);
     }
   }
 

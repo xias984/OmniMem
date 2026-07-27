@@ -117,3 +117,58 @@ test('i risultati sono ordinati per punteggio decrescente', async () => {
   const scores = result.results.map((r) => r.score);
   assert.deepEqual(scores, [...scores].sort((a, b) => b - a));
 });
+
+test('con seedChunks precalcolati non chiama embed/query una seconda volta', async () => {
+  let embedCalls = 0;
+  let queryCalls = 0;
+  const vector = {
+    embed: async () => { embedCalls += 1; return [[1, 0, 0]]; },
+    collection: { async query() { queryCalls += 1; return { documents: [[]], distances: [[]], metadatas: [[]], ids: [[]] }; } },
+  };
+  const graphRepo = {
+    async findEntitiesByAlias() { return []; },
+    async expandFromChunks() { return { nodes: [], edges: [] }; },
+    async expandFromEntities() { return { nodes: [], edges: [] }; },
+  };
+  const precomputed = [{ id: 'c1', text: 'Unity WebGL', metadata: {}, distance: 0.1, similarity: 0.9 }];
+  const result = await hybridRetrieve(
+    { queryText: 'Quale decisione ha sostituito quella vecchia?', namespace: 'ns', k: 3, seedChunks: precomputed },
+    { vector, graphRepo, graphEnabled: true, graphRetrieval: { maxHops: 2 }, scoring }
+  );
+  assert.equal(embedCalls, 0);
+  assert.equal(queryCalls, 0);
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].id, 'c1');
+});
+
+test('recupera il documento completo (non troncato) per i chunk trovati solo via grafo', async () => {
+  const cid = chunkId('ns', 'chunk_graph_only');
+  const fullText = 'x'.repeat(500); // piu lungo dei 280 char del summary troncato
+  const graphRepo = {
+    async findEntitiesByAlias() { return []; },
+    async expandFromChunks() {
+      return {
+        nodes: [{ id: cid, name: 'chunk_graph_only', summary: fullText.slice(0, 280), __labels: ['Chunk'], hop: 1, metadata: { chroma_id: 'chunk_graph_only' } }],
+        edges: [],
+      };
+    },
+    async expandFromEntities() { return { nodes: [], edges: [] }; },
+  };
+  const vector = {
+    embed: async () => [[1, 0, 0]],
+    collection: {
+      async query() { return { documents: [[]], distances: [[]], metadatas: [[]], ids: [[]] }; },
+      async get({ ids }) {
+        assert.deepEqual(ids, ['chunk_graph_only']);
+        return { ids: ['chunk_graph_only'], documents: [fullText] };
+      },
+    },
+  };
+  const result = await hybridRetrieve(
+    { queryText: 'Quale decisione ha sostituito quella vecchia?', namespace: 'ns', k: 3 },
+    { vector, graphRepo, graphEnabled: true, graphRetrieval: { maxHops: 2 }, scoring }
+  );
+  const found = result.results.find((r) => r.id === 'chunk_graph_only');
+  assert.equal(found.text, fullText);
+  assert.equal(found.text.length, 500);
+});

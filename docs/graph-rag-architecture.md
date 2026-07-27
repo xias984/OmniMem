@@ -76,14 +76,19 @@ Indicizzare due volte lo stesso contenuto produce sempre gli stessi id →
 
 ## 3. Ingestion e dual write
 
-Il percorso esistente (`processRecord`/`processIngestCodebase` in
+Il percorso esistente (`processRecord` e `processIngestCodebase` in
 `server.js`) è invariato: chunking, embedding, upsert su ChromaDB. Subito
-dopo l'upsert vettoriale, se `OMNIMEM_GRAPH_INDEXING_ENABLED=true`, viene
-accodato un job asincrono (`GraphIndexingQueue`, in-memory, stesso pattern
-già usato per i job di embedding) che:
+dopo l'upsert vettoriale — in **entrambi** i percorsi di ingestion (chat
+registrate e codebase indicizzata) — se `OMNIMEM_GRAPH_INDEXING_ENABLED=true`,
+viene accodato un job asincrono (`GraphIndexingQueue`, in-memory, stesso
+pattern già usato per i job di embedding) che:
 
 1. Upserta `Memory` + `Chunk` + `CHUNK_OF` (sempre, indipendentemente
-   dall'estrazione — struttura portante del grafo).
+   dall'estrazione — struttura portante del grafo). Queste scritture sono
+   **verificate**: se una di loro fallisce (Neo4j giù, timeout...) il job si
+   ferma subito con `{ ok: false, stage: 'structural' }`, senza nemmeno
+   chiamare l'estrattore, cosi' la coda lo ritenta invece di considerarlo
+   "riuscito a metà".
 2. Chiama lo **structured knowledge extractor** (`server/src/graph/extractor/`)
    sui chunk della memory, ottenendo entità/relazioni/decisioni **validate
    tramite schema Zod** (`extractor/schema.js`). Nessuna query Cypher è mai
@@ -94,15 +99,31 @@ già usato per i job di embedding) che:
    alias → fuzzy (Levenshtein normalizzato) → semantico (embedding, solo
    nella fascia ambigua) → classificazione `exact_match` / `automatic_merge`
    / `possible_duplicate` / `new_entity`. Mai merge distruttivo: anche in
-   automatic_merge si aggiornano solo alias e `metadata.merge_history`.
-4. Upserta relazioni e decisioni (con `SUPERSEDES` quando dichiarato,
+   automatic_merge si aggiornano solo alias e `metadata.merge_history`. Gli
+   alias vengono confrontati sempre in forma normalizzata (`aliases_normalized`),
+   cosi' un alias salvato con casing/punteggiatura originali resta comunque
+   trovabile da una query normalizzata.
+4. Collega ogni entità dichiarata ai chunk della memory con archi
+   `Chunk-[:MENTIONS]->Entity` (evidenza collettiva sul batch, perché lo
+   schema dell'estrattore non porta un `evidence_chunk_id` per-entità), e
+   ogni entità risolta "al volo" come endpoint di una relazione al suo chunk
+   di evidenza specifico. Senza questi archi, `findChunksByEntity` e
+   l'espansione del grafo seedata da un'entità non troverebbero mai i chunk
+   di supporto.
+5. Upserta relazioni e decisioni (con `SUPERSEDES` quando dichiarato,
    creando uno stub storico se la decisione superata non era ancora nel
    grafo, e marcando `active → superseded` quella esistente).
 
-Il fallimento di una qualsiasi fase 2-4 **non tocca** la struttura scritta
+Il fallimento di una qualsiasi fase 2-5 **non tocca** la struttura scritta
 al passo 1, e soprattutto non tocca in alcun modo il salvataggio vettoriale
 già avvenuto. In caso di fallimento definitivo (dopo i retry configurati),
 il job finisce in una dead-letter JSONL locale (`server/data/graph-dead-letter.jsonl`).
+
+Quando un topic viene cancellato (`DELETE /api/topics/:topic`), oltre ai
+chunk in ChromaDB viene ripulito (best-effort) anche il namespace
+corrispondente in Neo4j (`GraphRepository.deleteNamespace`): altrimenti
+entità, decisioni e relazioni di un topic esplicitamente rimosso resterebbero
+interrogabili dal retrieval ibrido.
 
 ## 4. Retrieval ibrido
 
@@ -118,23 +139,39 @@ specifica (`semantic→vector`, `relational/causal→vector+graph`,
 
 ### Vector retriever
 
-Stessa identica logica di `/api/query` oggi (embedding Ollama, query
-ChromaDB, filtro distanza coseno ≤ 0.75), estratta in
-`server/src/retrieval/vectorRetriever.js` per essere riusata.
+Stessa identica soglia/k di `/api/query` (0.85 di distanza coseno, k=12),
+implementata in `server/src/retrieval/vectorRetriever.js`. Nel percorso HTTP
+live, `/api/query` esegue l'embedding e la query ChromaDB **una sola volta**
+e passa il risultato già pronto a `hybridRetrieve` come `seedChunks`:
+`hybridRetrieve` chiama `vectorRetrieve` internamente solo se `seedChunks`
+non viene fornito (es. test diretti o usi standalone futuri), cosi' non
+esiste un secondo percorso vettoriale che rischia di divergere da quello
+canonico (soglia/raggruppamento per conversazione) usato per la risposta
+`/api/query` esistente.
 
 ### Graph retriever (`server/src/retrieval/graphRetriever.js`)
 
 1. Usa i chunk seed del vector retriever.
 2. Risolve le entità **citate nella query** con un matching alias/esatto su
-   n-gram (1-3 parole, stopword escluse, tetto configurabile di candidati) —
-   compromesso deliberato per evitare una chiamata LLM obbligatoria ad ogni
-   query (documentato nel piano).
+   n-gram (1-3 parole, stopword escluse, tetto configurabile di candidati),
+   cercando su **tutte le label "nameable"** (`Entity`, `Project`, `Tool`,
+   `Task`, `File`, `Session`, `Source` — vedi `QUERY_RESOLVABLE_LABELS` in
+   `entityTypeMapping.js`), non solo `:Entity`: un'entità indicizzata come
+   `:Project` o `:Tool` deve restare trovabile da una query che la nomina.
+   E' comunque un compromesso deliberato per evitare una chiamata LLM
+   obbligatoria ad ogni query (documentato nel piano).
 3. Espande il grafo da chunk-seed ed entità-seed, **massimo 2 hop**
    (configurabile, MAI variable-length illimitato: `GraphRepository`
    implementa l'espansione come due query esplicite hop-per-hop, ciascuna
    con `LIMIT`, non un singolo pattern Cypher `[*1..N]`).
 4. Raccoglie i chunk aggiuntivi trovati come evidence, le decisioni e le
    contraddizioni incontrate nel sottografo.
+
+Ogni metodo di lettura del `GraphRepository` (incluse le due query di
+espansione) **propaga** un fallimento Neo4j lanciando un'eccezione, invece
+di convertirlo silenziosamente in "nessun risultato": altrimenti un outage
+del grafo produrrebbe risposte che sembrano "il grafo è vuoto" invece di
+attivare correttamente il fallback al solo vettoriale.
 
 ### Hybrid retriever + scoring (`hybridRetriever.js`, `scoring.js`)
 
@@ -152,9 +189,17 @@ score = vector_similarity * w1 + graph_proximity * w2 + relation_confidence * w3
 Pesi e penalità **sempre da configurazione** (`server/src/config.js`, env
 `OMNIMEM_SCORE_*` / `OMNIMEM_PENALTY_*`), mai hardcoded nella logica.
 
-**Fallback sicuro**: se il grafo non è abilitato o la query al grafo fallisce
-(Neo4j giù, timeout...), si ritorna al solo vettoriale, con `fallbackToVector: true`
-tracciato nel risultato e nella metrica `fallback_to_vector`.
+Un chunk scoperto **solo** tramite espansione grafo porta con sé, sul nodo
+`Chunk`, solo un riepilogo troncato a 280 caratteri (`summary`): prima di
+finalizzare il risultato, `hybridRetriever` recupera il documento completo
+da ChromaDB tramite `chroma_id` (una singola chiamata batched per tutti i
+chunk graph-only), cosi' il contesto finale non presenta mai testo troncato
+rispetto a un chunk trovato dal solo vettoriale.
+
+**Fallback sicuro**: se il grafo non è abilitato, o una qualunque chiamata al
+grafo (query di lettura propagata come eccezione, vedi sopra) fallisce, si
+ritorna al solo vettoriale, con `fallbackToVector: true` tracciato nel
+risultato e nella metrica `fallback_to_vector`.
 
 ## 5. Context builder (`server/src/context/contextBuilder.js`)
 

@@ -16,3 +16,12 @@ const TYPE_TO_LABEL = Object.freeze({
 export function labelForEntityType(entityType) {
   return TYPE_TO_LABEL[entityType] ?? 'Entity';
 }
+
+/**
+ * Tutte le label "nameable" che possono comparire come entita' citate in una
+ * query (Entity generica + le label tipizzate sopra). Usata dal query-time
+ * entity resolution (graphRetriever) e dall'espansione seedata da entita',
+ * cosi' un'entita' indicizzata come :Project o :Tool resta trovabile: prima
+ * cercavano solo :Entity, perdendo silenziosamente ogni label tipizzata.
+ */
+export const QUERY_RESOLVABLE_LABELS = Object.freeze(['Entity', ...Object.values(TYPE_TO_LABEL)]);

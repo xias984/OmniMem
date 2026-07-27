@@ -241,7 +241,7 @@ Apri **http://localhost:3000** nel browser per un riepilogo visuale della memori
 {
   "query": "come si fa un decorator in Python?",
   "topic": "Coding Python",
-  "k": 4
+  "k": 12
 }
 ```
 
