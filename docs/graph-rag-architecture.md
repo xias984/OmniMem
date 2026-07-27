@@ -130,12 +130,20 @@ Quando un topic viene cancellato (`DELETE /api/topics/:topic`), oltre ai
 chunk in ChromaDB viene ripulito anche il namespace corrispondente in Neo4j
 (`GraphRepository.deleteNamespace`), accodato sulla stessa coda con
 retry/dead-letter dell'indicizzazione (`server/data/graph-delete-dead-letter.jsonl`)
-— gira ogni volta che un repository grafo esiste, non solo quando
-l'indicizzazione è *attualmente* abilitata, perché il grafo può essere
-stato popolato in passato con un flag diverso da quello corrente. Senza
-questo, entità, decisioni e relazioni di un topic esplicitamente rimosso
-resterebbero interrogabili dal retrieval ibrido, e un fallimento Neo4j
-isolato farebbe divergere silenziosamente e per sempre ChromaDB e il grafo.
+— **incondizionatamente, senza controllare alcun feature flag GraphRAG**.
+`createGraphRuntime` costruisce sempre un `GraphRepository` reale (connessione
+lazy a Neo4j: nessun I/O finché non serve, quindi nessun costo quando Neo4j
+non è nemmeno configurato), anche a `OMNIMEM_GRAPHRAG_ENABLED`/`_GRAPH_INDEXING_ENABLED`/`_GRAPH_SHADOW_MODE`
+tutti `false`: il grafo può essere stato popolato in un run precedente con i
+flag attivi, e se poi vengono disattivati un topic cancellato dall'utente
+deve comunque essere ripulito anche lì — altrimenti riattivando GraphRAG in
+futuro riemergerebbero entità e chunk-summary che l'utente ha esplicitamente
+rimosso. Solo l'indicizzazione (`enqueueIndexing`) resta gated dal flag
+`OMNIMEM_GRAPH_INDEXING_ENABLED`: è quello il comportamento che deve restare
+invariato a GraphRAG disattivato, non la pulizia. Un fallimento Neo4j isolato
+non blocca comunque la risposta HTTP (la cancellazione ChromaDB è già
+avvenuta) né fa divergere silenziosamente e per sempre i due datastore: la
+coda con retry/dead-letter garantisce che venga ritentato o almeno tracciato.
 
 ## 4. Retrieval ibrido
 
@@ -234,11 +242,14 @@ Regole:
   (decisioni attive → storiche → contraddizioni → fatti → entità →
   dipendenze); quando il budget si esaurisce, `truncatedByBudget: true`.
 
-**Limite noto**: la provenienza di un chunk trovato *solo* tramite
-espansione grafo (non anche dal vettoriale) oggi riporta id e timestamp ma
-non sempre `source_url`/`platform`, perché il nodo `Chunk` non porta con sé
-i metadati della `Memory` collegata senza un hop esplicito aggiuntivo.
-Estensione futura naturale (vedi sezione "Estensioni future").
+La provenienza di un chunk trovato *solo* tramite espansione grafo (non
+anche dal vettoriale) è recuperata da `hybridRetriever` insieme al documento
+completo: la stessa chiamata batched a ChromaDB (`chroma_id`) richiede sia
+`documents` sia `metadatas`, e questi ultimi (arricchiti nel `Chunk` node
+solo di `timestamp`) sostituiscono/completano la metadata del candidato
+prima dello scoring finale — cosi' `source_url`/`platform`/`file_path` sono
+sempre disponibili per il context builder, non solo per i chunk trovati
+anche dal vettoriale.
 
 ## 6. Feature flag
 
@@ -278,7 +289,5 @@ contenuto testuale. Copre tutte le metriche richieste: `vector_retrieval_duratio
   rilascio. Predisposta l'interfaccia concettuale (`CommunityBuilder`,
   `CommunitySummaryRepository`, `GlobalGraphRetriever`) come prossimo passo
   naturale una volta che il volume di dati nel grafo lo giustifichi.
-- Arricchire la provenienza dei chunk graph-only con un hop esplicito verso
-  `Memory` durante l'espansione.
 - Merge automatico assistito (revisione umana dei `possible_duplicate`) via
   dashboard.

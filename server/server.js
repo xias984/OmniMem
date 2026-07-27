@@ -587,14 +587,12 @@ app.delete('/api/topics/:topic', async (req, res) => {
     // Senza questo, un topic cancellato da ChromaDB lascerebbe entita',
     // decisioni e relazioni ancora interrogabili nel grafo: l'utente
     // vedrebbe risposte costruite su dati che ha esplicitamente rimosso.
-    // Gira ogni volta che un repository grafo esiste (non solo quando
-    // l'indicizzazione e' *attualmente* abilitata: puo' esserci stata
-    // popolata in passato), e usa la stessa coda con retry/dead-letter
+    // Incondizionato (nessun controllo sui feature flag GraphRAG): il grafo
+    // puo' essere stato popolato in un run precedente anche se i flag sono
+    // ora disattivati, e usa la stessa coda con retry/dead-letter
     // dell'indicizzazione, cosi' un fallimento Neo4j non fa divergere
     // silenziosamente e per sempre i due datastore.
-    if (graphRuntime.graphRepo) {
-      graphRuntime.enqueueNamespaceDeletion(topic);
-    }
+    graphRuntime.enqueueNamespaceDeletion(topic);
 
     res.json({ ok: true, deleted: ids.length });
   } catch (err) {

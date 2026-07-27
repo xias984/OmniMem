@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { hybridRetrieve } from '../src/retrieval/hybridRetriever.js';
 import { loadConfig } from '../src/config.js';
 import { chunkId } from '../src/ids.js';
+import { groupAndFormatChunks } from '../src/retrieval/chunkFormatting.js';
 
 const scoring = loadConfig({}).scoring;
 
@@ -158,9 +159,14 @@ test('recupera il documento completo (non troncato) per i chunk trovati solo via
     embed: async () => [[1, 0, 0]],
     collection: {
       async query() { return { documents: [[]], distances: [[]], metadatas: [[]], ids: [[]] }; },
-      async get({ ids }) {
+      async get({ ids, include }) {
         assert.deepEqual(ids, ['chunk_graph_only']);
-        return { ids: ['chunk_graph_only'], documents: [fullText] };
+        assert.deepEqual(include, ['documents', 'metadatas']);
+        return {
+          ids: ['chunk_graph_only'],
+          documents: [fullText],
+          metadatas: [{ source_url: 'https://chatgpt.com/x', platform: 'ChatGPT', timestamp: 123 }],
+        };
       },
     },
   };
@@ -171,4 +177,15 @@ test('recupera il documento completo (non troncato) per i chunk trovati solo via
   const found = result.results.find((r) => r.id === 'chunk_graph_only');
   assert.equal(found.text, fullText);
   assert.equal(found.text.length, 500);
+  // La provenienza deve arrivare dai metadata originali di Chroma, non
+  // restare ridotta al solo timestamp del nodo Chunk nel grafo.
+  assert.equal(found.metadata.source_url, 'https://chatgpt.com/x');
+  assert.equal(found.metadata.platform, 'ChatGPT');
+
+  // Integrazione con la formattazione finale: con la provenienza recuperata,
+  // il chunk graph-only non deve finire nel gruppo "unknown" senza fonte.
+  const formatted = groupAndFormatChunks(result.results.map((r) => ({ doc: r.text, meta: r.metadata, sortValue: 1 - r.score })));
+  const line = formatted.find((f) => f.includes(fullText));
+  assert.match(line, /\[ChatGPT — /);
+  assert.doesNotMatch(line, /\[\? — /);
 });

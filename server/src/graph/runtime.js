@@ -1,9 +1,20 @@
 /**
  * Punto di composizione del sotto-sistema GraphRAG: assembla Neo4j client,
  * repository, estrattore, coda di indicizzazione, in base ai feature flag.
- * Se GraphRAG e' disattivato (default), ritorna un runtime "no-op" cosi'
- * il resto del server puo' chiamarlo incondizionatamente senza `if` sparsi
- * e senza cambiare comportamento rispetto a oggi.
+ *
+ * Il client Neo4j e il repository vengono creati SEMPRE, anche quando
+ * `OMNIMEM_GRAPHRAG_ENABLED`/`_GRAPH_INDEXING_ENABLED`/`_GRAPH_SHADOW_MODE`
+ * sono tutti `false`: la connessione e' lazy (nessun I/O alla costruzione,
+ * vedi neo4jClient.js), quindi non c'e' alcun costo quando Neo4j non e'
+ * nemmeno configurato. Il motivo per cui NON si torna a un runtime "no-op
+ * puro" come prima e' la cancellazione di un namespace (`DELETE
+ * /api/topics/:topic`): il grafo puo' essere stato popolato in un run
+ * precedente con i flag attivi, e se poi vengono disattivati un topic
+ * cancellato dall'utente deve comunque essere ripulito anche li' — altrimenti
+ * riattivando GraphRAG in futuro riemergerebbero dati che l'utente ha
+ * esplicitamente rimosso. Indicizzazione e retrieval restano invece
+ * strettamente gated dai rispettivi flag (`enqueueIndexing` e i controlli in
+ * server.js su `enabled`/`shadowMode`): solo la pulizia e' incondizionata.
  */
 import { getNeo4jClient } from './neo4jClient.js';
 import { GraphRepository } from './graphRepository.js';
@@ -13,28 +24,7 @@ import { indexMemoryIntoGraph } from './dualWrite.js';
 import { embedOne } from '../embeddings.js';
 import { MetricsCollector } from '../observability/metrics.js';
 
-function noopRuntime(reason) {
-  return {
-    enabled: false,
-    indexingEnabled: false,
-    shadowMode: false,
-    graphRepo: null,
-    metrics: new MetricsCollector(),
-    reason,
-    enqueueIndexing() {},
-    enqueueNamespaceDeletion() {},
-    async healthCheck() {
-      return { healthy: false, reason };
-    },
-    async close() {},
-  };
-}
-
 export function createGraphRuntime(cfg) {
-  if (!cfg.graphRagEnabled && !cfg.graphIndexingEnabled && !cfg.graphShadowMode) {
-    return noopRuntime('GraphRAG disattivato (OMNIMEM_GRAPHRAG_ENABLED=false)');
-  }
-
   const metrics = new MetricsCollector();
   const client = getNeo4jClient(cfg.neo4j);
   const graphRepo = new GraphRepository(client);
@@ -85,10 +75,11 @@ export function createGraphRuntime(cfg) {
     },
     /**
      * Accoda la cancellazione di un namespace nel grafo. A differenza di
-     * `enqueueIndexing`, gira ogni volta che il grafo e' potenzialmente
-     * popolato (un repository esiste), non solo quando l'indicizzazione e'
-     * attualmente abilitata: dati possono essere stati scritti in passato
-     * anche se il flag e' stato disattivato nel frattempo.
+     * `enqueueIndexing`, NON e' gated da alcun feature flag: gira sempre,
+     * anche a GraphRAG completamente disattivato, perche' il grafo puo'
+     * essere stato popolato in un run precedente con i flag attivi. Se
+     * Neo4j non e' configurato/raggiungibile il job finisce semplicemente
+     * in dead-letter (nessun impatto sulla risposta HTTP).
      */
     enqueueNamespaceDeletion(namespace) {
       deleteQueue.enqueue({ namespace }).catch((err) => {

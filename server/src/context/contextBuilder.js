@@ -4,12 +4,10 @@
  * decisioni attive/superate, entita' correlate, dipendenze, contraddizioni,
  * evidence, fonti), provenienza esplicita e rispetto del token budget.
  *
- * Limite noto: la provenienza (source_url/platform) di un chunk trovato
- * SOLO tramite espansione grafo (non anche dal vettoriale) e' incompleta
- * in questa prima versione, perche' il nodo Chunk nel grafo non porta con
- * se' i metadati della Memory a cui appartiene se non viene esplicitamente
- * risolta con un hop aggiuntivo verso CHUNK_OF -> Memory. Documentato in
- * docs/graph-rag-architecture.md come estensione futura.
+ * La provenienza (source_url/platform/file_path) di un chunk trovato SOLO
+ * tramite espansione grafo e' gia' completa quando arriva qui:
+ * hybridRetriever la recupera da ChromaDB (insieme al testo integrale)
+ * prima di consegnare i risultati, vedi src/retrieval/hybridRetriever.js.
  */
 
 function estimateTokens(text, charsPerToken) {

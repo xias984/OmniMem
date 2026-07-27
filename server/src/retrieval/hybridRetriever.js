@@ -147,22 +147,29 @@ async function mergeAndScore({ seedChunks, graphResult, namespace, scoring, coll
   }
 
   // I chunk scoperti SOLO tramite espansione grafo hanno per ora solo il
-  // riepilogo troncato del nodo Chunk: recuperiamo il documento completo da
-  // ChromaDB (fino a 800 caratteri) in un'unica chiamata batched, cosi' il
-  // contesto finale non presenta mai testo troncato per i chunk graph-only.
+  // riepilogo troncato del nodo Chunk (e nessuna provenienza: il nodo Chunk
+  // non porta source_url/platform/file_path, quelli vivono sulla Memory).
+  // Recuperiamo da ChromaDB, in un'unica chiamata batched, sia il documento
+  // completo (fino a 800 caratteri) sia i metadata originali: senza questi
+  // ultimi, groupAndFormatChunks li classificherebbe tutti come "unknown"
+  // e senza fonte, perche' il solo `{ timestamp }` non basta.
   const graphOnlyIds = [...byChromaId.values()]
     .filter((c) => c.sources.has('graph') && !c.sources.has('vector'))
     .map((c) => c.id);
   if (graphOnlyIds.length > 0 && collection) {
     try {
-      const full = await collection.get({ ids: graphOnlyIds, include: ['documents'] });
+      const full = await collection.get({ ids: graphOnlyIds, include: ['documents', 'metadatas'] });
       const fullIds = full.ids ?? [];
       const fullDocs = full.documents ?? [];
+      const fullMetas = full.metadatas ?? [];
       fullIds.forEach((id, i) => {
-        if (fullDocs[i] && byChromaId.has(id)) byChromaId.get(id).text = fullDocs[i];
+        const candidate = byChromaId.get(id);
+        if (!candidate) return;
+        if (fullDocs[i]) candidate.text = fullDocs[i];
+        if (fullMetas[i]) candidate.metadata = { ...candidate.metadata, ...fullMetas[i] };
       });
     } catch (err) {
-      logger?.error?.(`[hybrid-retriever] impossibile recuperare il testo completo dei chunk graph-only: ${err.message}`);
+      logger?.error?.(`[hybrid-retriever] impossibile recuperare testo/metadati completi dei chunk graph-only: ${err.message}`);
     }
   }
 
