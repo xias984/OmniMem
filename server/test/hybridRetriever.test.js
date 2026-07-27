@@ -1,0 +1,191 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { hybridRetrieve } from '../src/retrieval/hybridRetriever.js';
+import { loadConfig } from '../src/config.js';
+import { chunkId } from '../src/ids.js';
+import { groupAndFormatChunks } from '../src/retrieval/chunkFormatting.js';
+
+const scoring = loadConfig({}).scoring;
+
+function fakeVectorDeps(chunks) {
+  return {
+    embed: async () => [[1, 0, 0]],
+    collection: {
+      async query() {
+        return {
+          documents: [chunks.map((c) => c.text)],
+          distances: [chunks.map((c) => c.distance ?? 0.1)],
+          metadatas: [chunks.map((c) => c.metadata ?? {})],
+          ids: [chunks.map((c) => c.id)],
+        };
+      },
+    },
+  };
+}
+
+test('query semantica usa solo il vettoriale (nessuna chiamata al grafo)', async () => {
+  let graphCalled = false;
+  const graphRepo = {
+    async findEntitiesByAlias() { graphCalled = true; return []; },
+    async expandFromChunks() { graphCalled = true; return { nodes: [], edges: [] }; },
+    async expandFromEntities() { graphCalled = true; return { nodes: [], edges: [] }; },
+  };
+  const result = await hybridRetrieve(
+    { queryText: 'Quale tecnologia è usata dal progetto?', namespace: 'ns', k: 3 },
+    { vector: fakeVectorDeps([{ id: 'c1', text: 'Unity WebGL' }]), graphRepo, graphEnabled: true, graphRetrieval: { maxHops: 2 }, scoring }
+  );
+  assert.equal(result.usedGraph, false);
+  assert.equal(graphCalled, false);
+  assert.equal(result.results.length, 1);
+});
+
+test('query decisionale usa il grafo quando disponibile', async () => {
+  const graphRepo = {
+    async findEntitiesByAlias() { return []; },
+    async expandFromChunks() { return { nodes: [], edges: [] }; },
+    async expandFromEntities() { return { nodes: [], edges: [] }; },
+  };
+  const result = await hybridRetrieve(
+    { queryText: 'Quale decisione ha sostituito quella vecchia?', namespace: 'ns', k: 3 },
+    { vector: fakeVectorDeps([{ id: 'c1', text: 'x' }]), graphRepo, graphEnabled: true, graphRetrieval: { maxHops: 2 }, scoring }
+  );
+  assert.equal(result.usedGraph, true);
+  assert.equal(result.category, 'decision');
+});
+
+test('fallback sicuro al vettoriale se il grafo non e abilitato', async () => {
+  const result = await hybridRetrieve(
+    { queryText: 'Quali problemi bloccano il progetto?', namespace: 'ns', k: 3 },
+    { vector: fakeVectorDeps([{ id: 'c1', text: 'x' }]), graphRepo: null, graphEnabled: false, graphRetrieval: { maxHops: 2 }, scoring }
+  );
+  assert.equal(result.usedGraph, false);
+  assert.equal(result.fallbackToVector, false); // disabilitato di proposito, non e' un fallimento
+  assert.equal(result.results.length, 1);
+});
+
+test('fallback sicuro al vettoriale se il grafo lancia un errore', async () => {
+  const graphRepo = {
+    async findEntitiesByAlias() { throw new Error('Neo4j giu'); },
+    async expandFromChunks() { throw new Error('Neo4j giu'); },
+    async expandFromEntities() { throw new Error('Neo4j giu'); },
+  };
+  const result = await hybridRetrieve(
+    { queryText: 'Da quali task dipende questa attività?', namespace: 'ns', k: 3 },
+    { vector: fakeVectorDeps([{ id: 'c1', text: 'x' }]), graphRepo, graphEnabled: true, graphRetrieval: { maxHops: 2 }, scoring, logger: { error() {} } }
+  );
+  assert.equal(result.fallbackToVector, true);
+  assert.equal(result.results.length, 1);
+});
+
+test('deduplica un chunk trovato sia dal vettoriale sia dall espansione grafo', async () => {
+  const cid = chunkId('ns', 'c1');
+  const graphRepo = {
+    async findEntitiesByAlias() { return []; },
+    async expandFromChunks() {
+      return {
+        nodes: [{ id: cid, name: 'c1', summary: 'testo', __labels: ['Chunk'], hop: 0, metadata: { chroma_id: 'c1' } }],
+        edges: [],
+      };
+    },
+    async expandFromEntities() { return { nodes: [], edges: [] }; },
+  };
+  const result = await hybridRetrieve(
+    { queryText: 'Quali decisioni non sono più valide?', namespace: 'ns', k: 3 },
+    { vector: fakeVectorDeps([{ id: 'c1', text: 'x' }]), graphRepo, graphEnabled: true, graphRetrieval: { maxHops: 2 }, scoring }
+  );
+  const occurrences = result.results.filter((r) => r.id === 'c1');
+  assert.equal(occurrences.length, 1);
+  assert.match(occurrences[0].source, /vector/);
+  assert.match(occurrences[0].source, /graph/);
+});
+
+test('i risultati sono ordinati per punteggio decrescente', async () => {
+  const graphRepo = {
+    async findEntitiesByAlias() { return []; },
+    async expandFromChunks() { return { nodes: [], edges: [] }; },
+    async expandFromEntities() { return { nodes: [], edges: [] }; },
+  };
+  const result = await hybridRetrieve(
+    { queryText: 'Esistono memorie in contraddizione?', namespace: 'ns', k: 3 },
+    {
+      vector: fakeVectorDeps([
+        { id: 'c1', text: 'a', distance: 0.5 },
+        { id: 'c2', text: 'b', distance: 0.1 },
+      ]),
+      graphRepo, graphEnabled: true, graphRetrieval: { maxHops: 2 }, scoring,
+    }
+  );
+  const scores = result.results.map((r) => r.score);
+  assert.deepEqual(scores, [...scores].sort((a, b) => b - a));
+});
+
+test('con seedChunks precalcolati non chiama embed/query una seconda volta', async () => {
+  let embedCalls = 0;
+  let queryCalls = 0;
+  const vector = {
+    embed: async () => { embedCalls += 1; return [[1, 0, 0]]; },
+    collection: { async query() { queryCalls += 1; return { documents: [[]], distances: [[]], metadatas: [[]], ids: [[]] }; } },
+  };
+  const graphRepo = {
+    async findEntitiesByAlias() { return []; },
+    async expandFromChunks() { return { nodes: [], edges: [] }; },
+    async expandFromEntities() { return { nodes: [], edges: [] }; },
+  };
+  const precomputed = [{ id: 'c1', text: 'Unity WebGL', metadata: {}, distance: 0.1, similarity: 0.9 }];
+  const result = await hybridRetrieve(
+    { queryText: 'Quale decisione ha sostituito quella vecchia?', namespace: 'ns', k: 3, seedChunks: precomputed },
+    { vector, graphRepo, graphEnabled: true, graphRetrieval: { maxHops: 2 }, scoring }
+  );
+  assert.equal(embedCalls, 0);
+  assert.equal(queryCalls, 0);
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].id, 'c1');
+});
+
+test('recupera il documento completo (non troncato) per i chunk trovati solo via grafo', async () => {
+  const cid = chunkId('ns', 'chunk_graph_only');
+  const fullText = 'x'.repeat(500); // piu lungo dei 280 char del summary troncato
+  const graphRepo = {
+    async findEntitiesByAlias() { return []; },
+    async expandFromChunks() {
+      return {
+        nodes: [{ id: cid, name: 'chunk_graph_only', summary: fullText.slice(0, 280), __labels: ['Chunk'], hop: 1, metadata: { chroma_id: 'chunk_graph_only' } }],
+        edges: [],
+      };
+    },
+    async expandFromEntities() { return { nodes: [], edges: [] }; },
+  };
+  const vector = {
+    embed: async () => [[1, 0, 0]],
+    collection: {
+      async query() { return { documents: [[]], distances: [[]], metadatas: [[]], ids: [[]] }; },
+      async get({ ids, include }) {
+        assert.deepEqual(ids, ['chunk_graph_only']);
+        assert.deepEqual(include, ['documents', 'metadatas']);
+        return {
+          ids: ['chunk_graph_only'],
+          documents: [fullText],
+          metadatas: [{ source_url: 'https://chatgpt.com/x', platform: 'ChatGPT', timestamp: 123 }],
+        };
+      },
+    },
+  };
+  const result = await hybridRetrieve(
+    { queryText: 'Quale decisione ha sostituito quella vecchia?', namespace: 'ns', k: 3 },
+    { vector, graphRepo, graphEnabled: true, graphRetrieval: { maxHops: 2 }, scoring }
+  );
+  const found = result.results.find((r) => r.id === 'chunk_graph_only');
+  assert.equal(found.text, fullText);
+  assert.equal(found.text.length, 500);
+  // La provenienza deve arrivare dai metadata originali di Chroma, non
+  // restare ridotta al solo timestamp del nodo Chunk nel grafo.
+  assert.equal(found.metadata.source_url, 'https://chatgpt.com/x');
+  assert.equal(found.metadata.platform, 'ChatGPT');
+
+  // Integrazione con la formattazione finale: con la provenienza recuperata,
+  // il chunk graph-only non deve finire nel gruppo "unknown" senza fonte.
+  const formatted = groupAndFormatChunks(result.results.map((r) => ({ doc: r.text, meta: r.metadata, sortValue: 1 - r.score })));
+  const line = formatted.find((f) => f.includes(fullText));
+  assert.match(line, /\[ChatGPT — /);
+  assert.doesNotMatch(line, /\[\? — /);
+});

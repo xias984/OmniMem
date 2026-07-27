@@ -22,6 +22,10 @@ package-lock.json
 # Cursori MCP locali
 mcp/.omnimem-cursors.json
 
+# Stato locale GraphRAG (checkpoint backfill, dead-letter indicizzazione)
+server/data/
+neo4j_data/
+
 # OS
 .DS_Store
 Thumbs.db

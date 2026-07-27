@@ -219,6 +219,9 @@ Apri **http://localhost:3000** nel browser per un riepilogo visuale della memori
 | `/api/export/:topic` | GET | Esporta memoria come Markdown |
 | `/api/ingest-codebase` | POST | Indicizza un progetto locale (asincrono) |
 | `/api/topics/:topic` | DELETE | Elimina tutti i chunk di un topic |
+| `/api/graph/health` | GET | Stato di GraphRAG e connessione Neo4j (additivo, vedi sotto) |
+| `/api/graph/metrics` | GET | Contatori/durate di osservabilità GraphRAG |
+| `/api/graph/backfill` | POST | Avvia il backfill del grafo dai chunk già in ChromaDB |
 
 **POST /api/record — body:**
 ```json
@@ -253,6 +256,36 @@ Apri **http://localhost:3000** nel browser per un riepilogo visuale della memori
 
 ---
 
+## Hybrid GraphRAG (Neo4j) — opzionale
+
+Oltre al RAG vettoriale (ChromaDB) descritto sopra, OmniMem supporta
+un'architettura **Hybrid GraphRAG**: ChromaDB continua a rispondere "quali
+memorie assomigliano semanticamente alla domanda?", mentre un knowledge
+graph Neo4j risponde "come sono collegate queste memorie e quale
+informazione è ancora valida?" (relazioni, dipendenze, decisioni superate,
+contraddizioni).
+
+**Di default è tutto disattivato**: senza configurazione, il comportamento è
+identico al RAG vettoriale esistente, zero regressioni. Per abilitarlo:
+
+```bash
+cp .env.example .env
+# imposta OMNIMEM_GRAPHRAG_ENABLED / OMNIMEM_GRAPH_INDEXING_ENABLED / OMNIMEM_GRAPH_SHADOW_MODE
+docker compose --profile with-graphrag up -d neo4j
+cd server && npm run graph:bootstrap   # constraint + indici
+npm run graph:backfill                 # indicizza nel grafo i chunk già in ChromaDB
+```
+
+Documentazione completa (modello dati, retrieval ibrido, backfill, shadow
+mode, rollback, troubleshooting):
+
+- [`docs/graph-rag-architecture.md`](docs/graph-rag-architecture.md)
+- [`docs/graph-rag-implementation-plan.md`](docs/graph-rag-implementation-plan.md)
+- [`docs/graph-rag-operations.md`](docs/graph-rag-operations.md)
+- [`docs/graph-rag-evaluation.md`](docs/graph-rag-evaluation.md)
+
+---
+
 ## Struttura del progetto
 
 ```
@@ -269,10 +302,23 @@ memory-ext-ai/
 │   ├── omnimem-mcp.js      # MCP server stdio per Claude Code
 │   └── package.json
 ├── server/
-│   ├── server.js           # Express + ChromaDB + Ollama
+│   ├── server.js           # Express + ChromaDB + Ollama (+ hook GraphRAG additivi)
+│   ├── src/
+│   │   ├── config.js       # Feature flag e configurazione GraphRAG
+│   │   ├── ids.js           # Chiavi canoniche / id stabili per idempotenza
+│   │   ├── chroma.js, embeddings.js
+│   │   ├── graph/           # Neo4j client, repository, extractor, entity resolution,
+│   │   │                     dual write, coda di indicizzazione, backfill
+│   │   ├── retrieval/        # Router, vector/graph retriever, hybrid retriever, scoring
+│   │   ├── context/           # Context builder
+│   │   ├── observability/     # Metriche strutturate
+│   │   └── cli/                # CLI di backfill/bootstrap Neo4j
+│   ├── test/                # Suite di test (node:test)
 │   ├── Dockerfile
 │   └── package.json
-├── docker-compose.yml
+├── docs/
+│   └── graph-rag-*.md       # Piano, architettura, operations, evaluation
+├── docker-compose.yml        # chromadb, ollama, neo4j (profilo with-graphrag), server
 ├── .env.example
 └── README.md
 ```
