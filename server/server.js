@@ -551,9 +551,17 @@ app.post('/api/query', async (req, res) => {
 app.get('/api/topics', async (req, res) => {
   try {
     const collection = await getCollection();
-    const results = await collection.get({ include: ['metadatas'], limit: 5000 });
-    const metas = results.metadatas ?? [];
-    const topics = [...new Set(metas.map((m) => m?.topic).filter(Boolean))].sort();
+    // Pagina su tutta la collezione: un limite fisso tagliava fuori i topic
+    // i cui chunk cadevano oltre i primi N record.
+    const PAGE = 5000;
+    const set = new Set();
+    for (let offset = 0; ; offset += PAGE) {
+      const results = await collection.get({ include: ['metadatas'], limit: PAGE, offset });
+      const metas = results.metadatas ?? [];
+      for (const m of metas) if (m?.topic) set.add(m.topic);
+      if (metas.length < PAGE) break;
+    }
+    const topics = [...set].sort();
     res.json({ ok: true, topics });
   } catch (err) {
     console.error('[topics]', err);
